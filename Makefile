@@ -1,12 +1,17 @@
-CXX = g++
-CXXFLAGS = -O3 -march=native -fopenmp -DNDEBUG
-LDFLAGS = -fopenmp
+CXX := g++
+CXXFLAGS := -O3 -march=native -fopenmp -DNDEBUG -Ioptimized/cpp
+LDFLAGS := -fopenmp
 
-all: optimized/gemm_opt
+SRC_DIR := optimized/cpp
+BUILD_DIR := optimized
+TARGET := $(BUILD_DIR)/gemm_opt
+SRC := $(SRC_DIR)/gemm_opt.cpp
 
-optimized/gemm_opt: optimized/cpp/gemm_opt.cpp
-	mkdir -p optimized
-	$(CXX) $(CXXFLAGS) -o optimized/gemm_opt optimized/cpp/gemm_opt.cpp $(LDFLAGS)
+all: $(TARGET)
+
+$(TARGET): $(SRC) $(SRC_DIR)/matrix.h $(SRC_DIR)/matrix.tpp
+	mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(SRC) -o $(TARGET) $(LDFLAGS)
 
 clean:
-	rm -f optimized/gemm_opt
+	rm -f $(TARGET)
