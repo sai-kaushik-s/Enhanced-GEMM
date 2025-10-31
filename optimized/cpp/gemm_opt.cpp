@@ -12,36 +12,28 @@ Usage: ./gemm_opt N num_threads
 #include <omp.h>
 #include "matrix.h"
 
-using namespace std;
-
 int main(int argc, char** argv) {
     if (argc < 3) {
-        cerr << "Usage: " << argv[0] << " N num_threads\n";
+        std::cerr << "Usage: " << argv[0] << " N num_threads\n";
         return 1;
     }
     int N = atoi(argv[1]);
     int T = atoi(argv[2]);
     omp_set_num_threads(T);
 
-    Matrix<double> matA(N, N, T), matB(N, N, T, true), matC(N, N, T);
-    // reproducible RNG
+    Matrix<double, false> matA(N, N, T), matC(N, N, T);
+    Matrix<double, true> matB(N, N, T);
+    
     matA.randomize();
     matB.randomize();
+    matC.initializeZero();
 
     double t0 = omp_get_wtime();
-    matC = multiply(matA, matB, 32);
+    multiply(matA, matB, matC);
     double t1 = omp_get_wtime();
-    cout << "N="<<N<<" T="<<T<<" time="<<(t1-t0)<<" seconds\n";
+    std::cout << "N="<<N<<" T="<<T<<" time="<<(t1-t0)<<" seconds\n";
 
-    // matC.print();
-
-    // simple checksum to validate
-    double s = 0;
-    for (int i = 0; i < N; ++i) {
-        for (int j = 0; j < N; ++j) {
-            s += matC(i, j);
-        }
-    }
-    cout << "checksum=" << s << "\n";
+    double s = matC.getChecksum();
+    std::cout << "checksum=" << s << "\n";
     return 0;
 }

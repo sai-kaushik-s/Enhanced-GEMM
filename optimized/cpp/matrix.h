@@ -4,50 +4,65 @@
 #include <iostream>
 #include <iomanip>
 #include <random>
+#include <vector>
+#include <memory>
+#include <cstddef>
+#include <stdexcept>
 
-template<typename T>
+
+template<typename T, bool IsTransposed = false>
 class Matrix;
 
-template<typename T>
-Matrix<T> multiply(const Matrix<T>& A, const Matrix<T>& B, int TILE_SIZE);
+template<typename T, bool T_A, bool T_B, bool T_C>
+void multiply(const Matrix<T, T_A>& A, const Matrix<T, T_B>& B, Matrix<T, T_C>& C);
 
-
-template<typename T>
+template<typename T, bool IsTransposed>
 class Matrix {
 private:
-    int rowSize;
-    int colSize;
-    int packSize;
-    T** data;
-    bool isTransposed;
-    int numCores;
+    std::size_t rowSize;
+    std::size_t colSize;
+    std::size_t packSize;
+    std::vector<T> flatData;
+    std::vector<T*> data;
+    std::size_t numCores;
+    std::size_t tileSize;
+
+    void rebuildDataPointers();
 
 public:
-    Matrix(int rows, int cols, int numCores, bool transposed = false);
+    Matrix(std::size_t rows, std::size_t cols, std::size_t numCores);
     Matrix(const Matrix& other);
-    ~Matrix();
+    
+    Matrix<T, IsTransposed>& operator=(const Matrix<T, IsTransposed>& other);
+    Matrix(Matrix<T, IsTransposed>&& other) noexcept = default;
+    Matrix<T, IsTransposed>& operator=(Matrix<T, IsTransposed>&& other) noexcept = default;
+    
+    ~Matrix() = default;
 
     void randomize();
     void print() const;
-    void printAsIs() const;
+    void write(std::ostream& os) const;
+    void initializeZero();
 
-    int rows() const;
-    int cols() const;
-    int packs() const;
-    bool transposed() const;
-    T** getData() const;
+    std::size_t getRowSize() const;
+    std::size_t getColSize() const;
+    std::size_t getPackSize() const;
+    std::size_t getTileSize() const;
+    std::size_t getNumCores() const;
+    T** getData();
+    const T* const* getData() const;
 
-    T& operator()(int i, int j);
-    const T& operator()(int i, int j) const;
+    T& operator()(std::size_t i, std::size_t j);
+    const T& operator()(std::size_t i, std::size_t j) const;
 
-    Matrix<T>& operator=(const Matrix<T>& other);
-    Matrix(Matrix<T>&& other) noexcept;
-    Matrix<T>& operator=(Matrix<T>&& other) noexcept;
+    Matrix<T, !IsTransposed> transpose() const;
 
     bool isIdentity() const;
     bool isZero() const;
+    T getChecksum() const;
 
-    friend Matrix<T> multiply<>(const Matrix<T>& A, const Matrix<T>& B, int TILE_SIZE);
+    friend void multiply<>(const Matrix<T, false>& A, const Matrix<T, true>& B, Matrix<T, false>& C);
+    friend void multiply<>(const Matrix<T, false>& A, const Matrix<T, false>& B, Matrix<T, false>& C);
 };
 
 #include "matrix.tpp"
