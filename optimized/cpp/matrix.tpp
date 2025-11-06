@@ -7,8 +7,8 @@
 #include <stdexcept>
 #include <unistd.h>
 
-template<typename T, bool IsTransposed>
-void Matrix<T, IsTransposed>::rebuildDataPointers() {
+template<typename T, StorageLayout Layout>
+void Matrix<T, Layout>::rebuildDataPointers() {
     if constexpr (IsTransposed) {
         data.resize(colSize);
         for (std::size_t i = 0; i < colSize; ++i)
@@ -20,8 +20,8 @@ void Matrix<T, IsTransposed>::rebuildDataPointers() {
     }
 }
 
-template<typename T, bool IsTransposed>
-Matrix<T, IsTransposed>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCores)
+template<typename T, StorageLayout Layout>
+Matrix<T, Layout>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCores)
     : rowSize(rows), colSize(cols), packSize(32 / sizeof(T)), numCores(numCores)
 {
     flatData.resize(rowSize * colSize); 
@@ -34,8 +34,8 @@ Matrix<T, IsTransposed>::Matrix(std::size_t rows, std::size_t cols, std::size_t 
     if (tileSize < 4) { tileSize = 4; }
 }
 
-template<typename T, bool IsTransposed>
-Matrix<T, IsTransposed>::Matrix(const Matrix& other)
+template<typename T, StorageLayout Layout>
+Matrix<T, Layout>::Matrix(const Matrix<T, Layout>& other)
     : rowSize(other.rowSize), 
       colSize(other.colSize), 
       packSize(other.packSize), 
@@ -46,8 +46,8 @@ Matrix<T, IsTransposed>::Matrix(const Matrix& other)
     rebuildDataPointers();
 }
 
-template<typename T, bool IsTransposed>
-Matrix<T, IsTransposed>& Matrix<T, IsTransposed>::operator=(const Matrix<T, IsTransposed>& other) {
+template<typename T, StorageLayout Layout>
+Matrix<T, Layout>& Matrix<T, Layout>::operator=(const Matrix<T, Layout>& other) {
     if (this == &other) { return *this; }
 
     flatData = other.flatData; 
@@ -63,8 +63,8 @@ Matrix<T, IsTransposed>& Matrix<T, IsTransposed>::operator=(const Matrix<T, IsTr
     return *this;
 }
 
-template<typename T, bool IsTransposed>
-void Matrix<T, IsTransposed>::randomize() {
+template<typename T, StorageLayout Layout>
+void Matrix<T, Layout>::randomize() {
     std::mt19937_64 rng(12345);
     std::normal_distribution<double> dist(0.0, 1.0);
 
@@ -73,8 +73,8 @@ void Matrix<T, IsTransposed>::randomize() {
             (*this)(i, j) = static_cast<T>(dist(rng));
 }
 
-template<typename T, bool IsTransposed>
-void Matrix<T, IsTransposed>::write(std::ostream& os) const {
+template<typename T, StorageLayout Layout>
+void Matrix<T, Layout>::write(std::ostream& os) const {
     for (std::size_t i = 0; i < rowSize; ++i) {
         for (std::size_t j = 0; j < colSize; ++j)
             os << std::setw(8) << (*this)(i, j) << " ";
@@ -82,13 +82,13 @@ void Matrix<T, IsTransposed>::write(std::ostream& os) const {
     }
 }
 
-template<typename T, bool IsTransposed>
-void Matrix<T, IsTransposed>::print() const {
+template<typename T, StorageLayout Layout>
+void Matrix<T, Layout>::print() const {
     write(std::cout);
 }
 
-template<typename T, bool IsTransposed>
-bool Matrix<T, IsTransposed>::isIdentity() const {
+template<typename T, StorageLayout Layout>
+bool Matrix<T, Layout>::isIdentity() const {
     if (rowSize != colSize) { return false; }
 
     bool diagonal = true;
@@ -114,8 +114,8 @@ bool Matrix<T, IsTransposed>::isIdentity() const {
     return offDiagonal;
 }
 
-template<typename T, bool IsTransposed>
-bool Matrix<T, IsTransposed>::isZero() const {
+template<typename T, StorageLayout Layout>
+bool Matrix<T, Layout>::isZero() const {
     bool allZero = true;
     #pragma omp parallel for num_threads(getNumCores()) reduction(&&:allZero) collapse(2)
     for (std::size_t i = 0; i < rowSize; ++i) {
@@ -128,8 +128,8 @@ bool Matrix<T, IsTransposed>::isZero() const {
     return allZero;
 }
 
-template<typename T, bool IsTransposed>
-T Matrix<T, IsTransposed>::getChecksum() const {
+template<typename T, StorageLayout Layout>
+T Matrix<T, Layout>::getChecksum() const {
     T checksum = T(0);
     #pragma omp parallel for num_threads(getNumCores()) reduction(+:checksum) collapse(2)
     for (std::size_t i = 0; i < rowSize; ++i) {
@@ -140,8 +140,8 @@ T Matrix<T, IsTransposed>::getChecksum() const {
     return checksum;
 }
 
-template<typename T, bool IsTransposed>
-void Matrix<T, IsTransposed>::initializeZero() {
+template<typename T, StorageLayout Layout>
+void Matrix<T, Layout>::initializeZero() {
     #pragma omp parallel for num_threads(getNumCores()) collapse(2)
     for (std::size_t i = 0; i < rowSize; ++i) {
         for (std::size_t j = 0; j < colSize; ++j) {
@@ -150,36 +150,36 @@ void Matrix<T, IsTransposed>::initializeZero() {
     }
 }
 
-template<typename T, bool IsTransposed>
-std::size_t Matrix<T, IsTransposed>::getRowSize() const { return rowSize; }
+template<typename T, StorageLayout Layout>
+std::size_t Matrix<T, Layout>::getRowSize() const { return rowSize; }
 
-template<typename T, bool IsTransposed>
-std::size_t Matrix<T, IsTransposed>::getColSize() const { return colSize; }
+template<typename T, StorageLayout Layout>
+std::size_t Matrix<T, Layout>::getColSize() const { return colSize; }
 
-template<typename T, bool IsTransposed>
-std::size_t Matrix<T, IsTransposed>::getPackSize() const { return packSize; }
+template<typename T, StorageLayout Layout>
+std::size_t Matrix<T, Layout>::getPackSize() const { return packSize; }
 
-template<typename T, bool IsTransposed>
-std::size_t Matrix<T, IsTransposed>::getTileSize() const { return tileSize; }
+template<typename T, StorageLayout Layout>
+std::size_t Matrix<T, Layout>::getTileSize() const { return tileSize; }
 
-template<typename T, bool IsTransposed>
-std::size_t Matrix<T, IsTransposed>::getNumCores() const { return numCores; }
+template<typename T, StorageLayout Layout>
+std::size_t Matrix<T, Layout>::getNumCores() const { return numCores; }
 
-template<typename T, bool IsTransposed>
-T** Matrix<T, IsTransposed>::getData() { return data.data(); }
+template<typename T, StorageLayout Layout>
+T** Matrix<T, Layout>::getData() { return data.data(); }
 
-template<typename T, bool IsTransposed>
-const T* const* Matrix<T, IsTransposed>::getData() const { return data.data(); }
+template<typename T, StorageLayout Layout>
+const T* const* Matrix<T, Layout>::getData() const { return data.data(); }
 
-template<typename T, bool IsTransposed>
-T& Matrix<T, IsTransposed>::operator()(std::size_t i, std::size_t j) {
+template<typename T, StorageLayout Layout>
+T& Matrix<T, Layout>::operator()(std::size_t i, std::size_t j) {
     if constexpr (IsTransposed) { return data[j][i]; } 
     else { return data[i][j]; }
 }
 
-template<typename T, bool IsTransposed>
-Matrix<T, !IsTransposed> Matrix<T, IsTransposed>::transpose() const {
-    Matrix<T, !IsTransposed> result(getColSize(), getRowSize(), getNumCores());
+template<typename T, StorageLayout Layout>
+Matrix<T, (Layout == StorageLayout::RowMajor ? StorageLayout::ColMajor : StorageLayout::RowMajor)> Matrix<T, Layout>::transpose() const {
+    Matrix<T, (Layout == StorageLayout::RowMajor ? StorageLayout::ColMajor : StorageLayout::RowMajor)> result(getColSize(), getRowSize(), getNumCores());
 
     #pragma omp parallel for num_threads(getNumCores()) collapse(2)
     for (std::size_t i = 0; i < rowSize; ++i) {
@@ -191,15 +191,17 @@ Matrix<T, !IsTransposed> Matrix<T, IsTransposed>::transpose() const {
     return result;
 }
 
-template<typename T, bool IsTransposed>
-const T& Matrix<T, IsTransposed>::operator()(std::size_t i, std::size_t j) const {
+template<typename T, StorageLayout Layout>
+const T& Matrix<T, Layout>::operator()(std::size_t i, std::size_t j) const {
     if constexpr (IsTransposed) { return data[j][i]; } 
     else { return data[i][j]; }
 }
 
-template<typename T, bool T_A, bool T_B, bool T_C>
-void multiply(const Matrix<T, T_A>& A, const Matrix<T, T_B>& B, Matrix<T, T_C>& C) {
-    if constexpr (!T_A && T_B && !T_C) {
+template<typename T, StorageLayout L_A, StorageLayout L_B, StorageLayout L_C>
+void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& C) {
+    if constexpr (L_A == StorageLayout::RowMajor && 
+                  L_B == StorageLayout::ColMajor && 
+                  L_C == StorageLayout::RowMajor) {
         if (A.getColSize() != B.getRowSize()) { throw std::invalid_argument("Dimension mismatch in multiply"); }
         if (A.isZero() || B.isIdentity()) { C = A; return; }
         if (B.isZero() || A.isIdentity()) { C = B.transpose(); return; }
@@ -248,10 +250,12 @@ void multiply(const Matrix<T, T_A>& A, const Matrix<T, T_B>& B, Matrix<T, T_C>& 
             }
         }
     }
-    else if constexpr (!T_A && !T_B && !T_C) {
+    else if constexpr (L_A == StorageLayout::RowMajor && 
+                       L_B == StorageLayout::RowMajor && 
+                       L_C == StorageLayout::RowMajor) {
         multiply(A, B.transpose(), C);
     }
     else {
-        static_assert(T_A != T_A, "Unsupported Matrix multiply combination!");
+        static_assert(L_A != L_A, "Unsupported Matrix multiply combination!");
     }
 }

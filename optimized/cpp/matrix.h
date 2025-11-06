@@ -9,14 +9,18 @@
 #include <cstddef>
 #include <stdexcept>
 
+enum class StorageLayout {
+    RowMajor,
+    ColMajor
+};
 
-template<typename T, bool IsTransposed = false>
+template<typename T, StorageLayout Layout>
 class Matrix;
 
-template<typename T, bool T_A, bool T_B, bool T_C>
-void multiply(const Matrix<T, T_A>& A, const Matrix<T, T_B>& B, Matrix<T, T_C>& C);
+template<typename T, StorageLayout L_A, StorageLayout L_B, StorageLayout L_C>
+void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& C);
 
-template<typename T, bool IsTransposed>
+template<typename T, StorageLayout Layout>
 class Matrix {
 private:
     std::size_t rowSize;
@@ -27,15 +31,17 @@ private:
     std::size_t numCores;
     std::size_t tileSize;
 
+    static constexpr bool IsTransposed = (Layout == StorageLayout::ColMajor);
+
     void rebuildDataPointers();
 
 public:
     Matrix(std::size_t rows, std::size_t cols, std::size_t numCores);
     Matrix(const Matrix& other);
     
-    Matrix<T, IsTransposed>& operator=(const Matrix<T, IsTransposed>& other);
-    Matrix(Matrix<T, IsTransposed>&& other) noexcept = default;
-    Matrix<T, IsTransposed>& operator=(Matrix<T, IsTransposed>&& other) noexcept = default;
+    Matrix<T, Layout>& operator=(const Matrix<T, Layout>& other);;
+    Matrix(Matrix<T, Layout>&& other) noexcept = default;
+    Matrix<T, Layout>& operator=(Matrix<T, Layout>&& other) noexcept = default;
     
     ~Matrix() = default;
 
@@ -55,14 +61,14 @@ public:
     T& operator()(std::size_t i, std::size_t j);
     const T& operator()(std::size_t i, std::size_t j) const;
 
-    Matrix<T, !IsTransposed> transpose() const;
+    Matrix<T, (Layout == StorageLayout::RowMajor ? StorageLayout::ColMajor : StorageLayout::RowMajor)> transpose() const;
 
     bool isIdentity() const;
     bool isZero() const;
     T getChecksum() const;
 
-    friend void multiply<>(const Matrix<T, false>& A, const Matrix<T, true>& B, Matrix<T, false>& C);
-    friend void multiply<>(const Matrix<T, false>& A, const Matrix<T, false>& B, Matrix<T, false>& C);
+    friend void multiply<>(const Matrix<T, StorageLayout::RowMajor>& A, const Matrix<T, StorageLayout::ColMajor>& B, Matrix<T, StorageLayout::RowMajor>& C);
+    friend void multiply<>(const Matrix<T, StorageLayout::RowMajor>& A, const Matrix<T, StorageLayout::RowMajor>& B, Matrix<T, StorageLayout::RowMajor>& C);
 };
 
 #include "matrix.tpp"
