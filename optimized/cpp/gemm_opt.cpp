@@ -13,11 +13,11 @@ C++ optimized skeleton for GEMM.
 Usage: ./gemm_opt N num_threads
 */
 
-// --- 1. Replaced <bits/stdc++.h> with specific headers ---
 #include <iostream>
 #include <string>
 #include <stdexcept>
 #include <omp.h>
+#include <numa.h>
 #include "matrix.h"
 
 int main(int argc, char** argv) {
@@ -38,11 +38,8 @@ int main(int argc, char** argv) {
 
     omp_set_num_threads(static_cast<int>(T));
 
-    using MatRow = Matrix<double, false>;
-    using MatCol = Matrix<double, true>;
-
-    MatRow matA(N, N, T), matC(N, N, T);
-    MatCol matB(N, N, T);
+    Matrix<double, StorageLayout::RowMajor> matA(N, N, T), matC(N, N, T);
+    Matrix<double, StorageLayout::ColMajor> matB(N, N, T);
     
     matA.randomize();
     matB.randomize();

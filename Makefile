@@ -1,6 +1,6 @@
 CXX := g++
 CXXFLAGS := -O3 -march=native -fopenmp -DNDEBUG -Ioptimized/cpp
-LDFLAGS := -fopenmp
+LDFLAGS := -fopenmp -lnuma
 
 SRC_DIR := optimized/cpp
 BUILD_DIR := optimized
