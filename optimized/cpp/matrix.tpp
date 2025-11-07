@@ -21,8 +21,11 @@ void Matrix<T, Layout>::rebuildDataPointers() {
 }
 
 template<typename T, StorageLayout Layout>
-Matrix<T, Layout>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCores)
-    : rowSize(rows), colSize(cols), packSize(32 / sizeof(T)), numCores(numCores)
+Matrix<T, Layout>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCores) : 
+    rowSize(rows), 
+    colSize(cols), 
+    packSize(32 / sizeof(T)), 
+    numCores(numCores)
 {
     flatData.resize(rowSize * colSize); 
     rebuildDataPointers();
@@ -35,13 +38,13 @@ Matrix<T, Layout>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCor
 }
 
 template<typename T, StorageLayout Layout>
-Matrix<T, Layout>::Matrix(const Matrix<T, Layout>& other)
-    : rowSize(other.rowSize), 
-      colSize(other.colSize), 
-      packSize(other.packSize), 
-      flatData(other.flatData),
-      numCores(other.numCores), 
-      tileSize(other.tileSize)
+Matrix<T, Layout>::Matrix(const Matrix<T, Layout>& other) : 
+    rowSize(other.rowSize), 
+    colSize(other.colSize), 
+    packSize(other.packSize), 
+    flatData(other.flatData),
+    numCores(other.numCores), 
+    tileSize(other.tileSize)
 {
     rebuildDataPointers();
 }
@@ -65,12 +68,19 @@ Matrix<T, Layout>& Matrix<T, Layout>::operator=(const Matrix<T, Layout>& other) 
 
 template<typename T, StorageLayout Layout>
 void Matrix<T, Layout>::randomize() {
-    std::mt19937_64 rng(12345);
-    std::normal_distribution<double> dist(0.0, 1.0);
-
-    for (std::size_t i = 0; i < rowSize; ++i)
-        for (std::size_t j = 0; j < colSize; ++j)
-            (*this)(i, j) = static_cast<T>(dist(rng));
+    #pragma omp parallel num_threads(getNumCores())
+    {
+        int tid = omp_get_thread_num();
+        std::mt19937_64 rng(12345 + tid * 12345);
+        std::normal_distribution<double> dist(0.0, 1.0);
+        
+        #pragma omp for collapse(2) schedule(static, 1)
+        for (std::size_t i = 0; i < rowSize; ++i) {
+            for (std::size_t j = 0; j < colSize; ++j) {
+                (*this)(i, j) = static_cast<T>(dist(rng));
+            }
+        }
+    }
 }
 
 template<typename T, StorageLayout Layout>
@@ -92,7 +102,7 @@ bool Matrix<T, Layout>::isIdentity() const {
     if (rowSize != colSize) { return false; }
 
     bool diagonal = true;
-    #pragma omp parallel for num_threads(getNumCores()) reduction(&&:diagonal)
+    #pragma omp parallel for num_threads(getNumCores()) reduction(&&:diagonal) schedule(static, 1)
     for (std::size_t i = 0; i < rowSize; ++i) {
         if ((*this)(i, i) != T(1)) {
             diagonal = false;
@@ -102,7 +112,7 @@ bool Matrix<T, Layout>::isIdentity() const {
     if (!diagonal) { return false; }
 
     bool offDiagonal = true;
-    #pragma omp parallel for num_threads(getNumCores()) reduction(&&:offDiagonal) collapse(2)
+    #pragma omp parallel for num_threads(getNumCores()) reduction(&&:offDiagonal) collapse(2) schedule(static, 1)
     for (std::size_t i = 0; i < rowSize; ++i) {
         for (std::size_t j = 0; j < colSize; ++j) {
             if (i != j && (*this)(i, j) != T(0)) {
@@ -117,7 +127,7 @@ bool Matrix<T, Layout>::isIdentity() const {
 template<typename T, StorageLayout Layout>
 bool Matrix<T, Layout>::isZero() const {
     bool allZero = true;
-    #pragma omp parallel for num_threads(getNumCores()) reduction(&&:allZero) collapse(2)
+    #pragma omp parallel for num_threads(getNumCores()) reduction(&&:allZero) collapse(2) schedule(static, 1)
     for (std::size_t i = 0; i < rowSize; ++i) {
         for (std::size_t j = 0; j < colSize; ++j) {
             if ((*this)(i, j) != T(0)) {
@@ -131,7 +141,7 @@ bool Matrix<T, Layout>::isZero() const {
 template<typename T, StorageLayout Layout>
 T Matrix<T, Layout>::getChecksum() const {
     T checksum = T(0);
-    #pragma omp parallel for num_threads(getNumCores()) reduction(+:checksum) collapse(2)
+    #pragma omp parallel for num_threads(getNumCores()) reduction(+:checksum) collapse(2) schedule(static, 1)
     for (std::size_t i = 0; i < rowSize; ++i) {
         for (std::size_t j = 0; j < colSize; ++j) {
             checksum += (*this)(i, j);
@@ -142,7 +152,7 @@ T Matrix<T, Layout>::getChecksum() const {
 
 template<typename T, StorageLayout Layout>
 void Matrix<T, Layout>::initializeZero() {
-    #pragma omp parallel for num_threads(getNumCores()) collapse(2)
+    #pragma omp parallel for num_threads(getNumCores()) collapse(2) schedule(static, 1)
     for (std::size_t i = 0; i < rowSize; ++i) {
         for (std::size_t j = 0; j < colSize; ++j) {
             (*this)(i, j) = T(0);
@@ -181,7 +191,7 @@ template<typename T, StorageLayout Layout>
 Matrix<T, (Layout == StorageLayout::RowMajor ? StorageLayout::ColMajor : StorageLayout::RowMajor)> Matrix<T, Layout>::transpose() const {
     Matrix<T, (Layout == StorageLayout::RowMajor ? StorageLayout::ColMajor : StorageLayout::RowMajor)> result(getColSize(), getRowSize(), getNumCores());
 
-    #pragma omp parallel for num_threads(getNumCores()) collapse(2)
+    #pragma omp parallel for num_threads(getNumCores()) collapse(2) schedule(static, 1)
     for (std::size_t i = 0; i < rowSize; ++i) {
         for (std::size_t j = 0; j < colSize; ++j) {
             result(j, i) = (*this)(i, j);
@@ -199,9 +209,7 @@ const T& Matrix<T, Layout>::operator()(std::size_t i, std::size_t j) const {
 
 template<typename T, StorageLayout L_A, StorageLayout L_B, StorageLayout L_C>
 void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& C) {
-    if constexpr (L_A == StorageLayout::RowMajor && 
-                  L_B == StorageLayout::ColMajor && 
-                  L_C == StorageLayout::RowMajor) {
+    if constexpr (L_A == StorageLayout::RowMajor && L_B == StorageLayout::ColMajor && L_C == StorageLayout::RowMajor) {
         if (A.getColSize() != B.getRowSize()) { throw std::invalid_argument("Dimension mismatch in multiply"); }
         if (A.isZero() || B.isIdentity()) { C = A; return; }
         if (B.isZero() || A.isIdentity()) { C = B.transpose(); return; }
@@ -250,9 +258,7 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
             }
         }
     }
-    else if constexpr (L_A == StorageLayout::RowMajor && 
-                       L_B == StorageLayout::RowMajor && 
-                       L_C == StorageLayout::RowMajor) {
+    else if constexpr (L_A == StorageLayout::RowMajor && L_B == StorageLayout::RowMajor && L_C == StorageLayout::RowMajor) {
         multiply(A, B.transpose(), C);
     }
     else {
