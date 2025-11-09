@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <unistd.h>
+#include <immintrin.h>
 
 template<typename T, StorageLayout Layout>
 void Matrix<T, Layout>::rebuildDataPointers() {
@@ -207,17 +208,26 @@ const T& Matrix<T, Layout>::operator()(std::size_t i, std::size_t j) const {
     else { return data[i][j]; }
 }
 
+static inline double hsum256_pd(__m256d v) {
+    __m128d lo = _mm256_castpd256_pd128(v);
+    __m128d hi = _mm256_extractf128_pd(v, 1);
+    __m128d s  = _mm_add_pd(lo, hi);
+    s = _mm_add_sd(s, _mm_unpackhi_pd(s, s));
+    return _mm_cvtsd_f64(s);
+}
+
 template<typename T, StorageLayout L_A, StorageLayout L_B, StorageLayout L_C>
 void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& C) {
     if constexpr (L_A == StorageLayout::RowMajor && L_B == StorageLayout::ColMajor && L_C == StorageLayout::RowMajor) {
         if (A.getColSize() != B.getRowSize()) { throw std::invalid_argument("Dimension mismatch in multiply"); }
-        if (A.isZero() || B.isIdentity()) { C = A; return; }
-        if (B.isZero() || A.isIdentity()) { C = B.transpose(); return; }
+        // if (A.isZero() || B.isIdentity()) { C = A; return; }
+        // if (B.isZero() || A.isIdentity()) { C = B.transpose(); return; }
 
         std::size_t tileSize = A.getTileSize();
         std::size_t aRows = A.getRowSize();
         std::size_t bCols = B.getColSize();
         std::size_t aCols = A.getColSize();
+        const std::size_t W = 4; // AVX2 256bit / 64bit = 4 doubles
 
         #pragma omp parallel for num_threads(A.getNumCores()) collapse(2) schedule(static, 1)
         for (std::size_t i = 0; i < aRows; i += tileSize) {
@@ -234,8 +244,32 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
                             T sum1 = C(ii, jj + 1);
                             T sum2 = C(ii, jj + 2);
                             T sum3 = C(ii, jj + 3);
-                            for (std::size_t kk = k; kk < kkEnd; ++kk) {
-                                T a_val = A(ii, kk);
+                            __m256d acc0 = _mm256_setzero_pd();
+                            __m256d acc1 = _mm256_setzero_pd();
+                            __m256d acc2 = _mm256_setzero_pd();
+                            __m256d acc3 = _mm256_setzero_pd();
+
+                            std::size_t kk_vec_end = k + ((kkEnd - k) / W) * W;
+
+                            for (std::size_t kk = k; kk < kk_vec_end; kk += W) {
+                                __m256d a = _mm256_loadu_pd(&A(ii, kk));
+
+                                __m256d b0 = _mm256_loadu_pd(&B(kk, jj + 0));
+                                __m256d b1 = _mm256_loadu_pd(&B(kk, jj + 1));
+                                __m256d b2 = _mm256_loadu_pd(&B(kk, jj + 2));
+                                __m256d b3 = _mm256_loadu_pd(&B(kk, jj + 3));
+
+                                acc0 = _mm256_fmadd_pd(a, b0, acc0);
+                                acc1 = _mm256_fmadd_pd(a, b1, acc1);
+                                acc2 = _mm256_fmadd_pd(a, b2, acc2);
+                                acc3 = _mm256_fmadd_pd(a, b3, acc3);
+                            }
+                            sum0 += hsum256_pd(acc0);
+                            sum1 += hsum256_pd(acc1);
+                            sum2 += hsum256_pd(acc2);
+                            sum3 += hsum256_pd(acc3);
+                            for (std::size_t kk = kk_vec_end; kk < kkEnd; ++kk) {
+                                double a_val = A(ii, kk);
                                 sum0 += a_val * B(kk, jj + 0);
                                 sum1 += a_val * B(kk, jj + 1);
                                 sum2 += a_val * B(kk, jj + 2);
@@ -259,7 +293,7 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
         }
     }
     else if constexpr (L_A == StorageLayout::RowMajor && L_B == StorageLayout::RowMajor && L_C == StorageLayout::RowMajor) {
-        multiply(A, B.transpose(), C);
+       multiply(A, B.transpose(), C);
     }
     else {
         static_assert(L_A != L_A, "Unsupported Matrix multiply combination!");
