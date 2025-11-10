@@ -228,7 +228,6 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
         std::size_t aRows = A.getRowSize();
         std::size_t bCols = B.getColSize();
         std::size_t aCols = A.getColSize();
-        const std::size_t W = 4;
 
         #pragma omp parallel for num_threads(A.getNumCores()) collapse(2) schedule(static, 1)
         for (std::size_t i = 0; i < aRows; i += tileSize) {
@@ -238,49 +237,60 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
                     const std::size_t jjEnd = std::min(j + tileSize, bCols);
                     const std::size_t kkEnd = std::min(k + tileSize, aCols);
                     #ifdef __AVX2__
+                        const std::size_t W = 4;
+                        std::size_t kk_vec_end = k + ((kkEnd - k) / W) * W;
                         for (std::size_t ii = i; ii < iiEnd; ++ii) {
                             std::size_t jj = j;
-                            const std::size_t jjUnrolledEnd = j + ((jjEnd - j) / 4) * 4;
-                            for (; jj < jjUnrolledEnd; jj += 4) {
+                            const std::size_t jjUnrolledEnd = j + ((jjEnd - j) / 6) * 6;
+                            for (; jj < jjUnrolledEnd; jj += 6) {
                                 T sum0 = C(ii, jj + 0);
                                 T sum1 = C(ii, jj + 1);
                                 T sum2 = C(ii, jj + 2);
                                 T sum3 = C(ii, jj + 3);
+                                T sum4 = C(ii, jj + 4);
+                                T sum5 = C(ii, jj + 5);
                                 __m256d acc0 = _mm256_setzero_pd();
                                 __m256d acc1 = _mm256_setzero_pd();
                                 __m256d acc2 = _mm256_setzero_pd();
                                 __m256d acc3 = _mm256_setzero_pd();
-
-                                std::size_t kk_vec_end = k + ((kkEnd - k) / W) * W;
-
+                                __m256d acc4 = _mm256_setzero_pd();
+                                __m256d acc5 = _mm256_setzero_pd();
                                 for (std::size_t kk = k; kk < kk_vec_end; kk += W) {
                                     __m256d a = _mm256_loadu_pd(&A(ii, kk));
-
                                     __m256d b0 = _mm256_loadu_pd(&B(kk, jj + 0));
                                     __m256d b1 = _mm256_loadu_pd(&B(kk, jj + 1));
                                     __m256d b2 = _mm256_loadu_pd(&B(kk, jj + 2));
                                     __m256d b3 = _mm256_loadu_pd(&B(kk, jj + 3));
-
+                                    __m256d b4 = _mm256_loadu_pd(&B(kk, jj + 4));
+                                    __m256d b5 = _mm256_loadu_pd(&B(kk, jj + 5));
                                     acc0 = _mm256_fmadd_pd(a, b0, acc0);
                                     acc1 = _mm256_fmadd_pd(a, b1, acc1);
                                     acc2 = _mm256_fmadd_pd(a, b2, acc2);
                                     acc3 = _mm256_fmadd_pd(a, b3, acc3);
+                                    acc4 = _mm256_fmadd_pd(a, b4, acc4);
+                                    acc5 = _mm256_fmadd_pd(a, b5, acc5);
                                 }
                                 sum0 += hsum256_pd(acc0);
                                 sum1 += hsum256_pd(acc1);
                                 sum2 += hsum256_pd(acc2);
                                 sum3 += hsum256_pd(acc3);
+                                sum4 += hsum256_pd(acc4);
+                                sum5 += hsum256_pd(acc5);
                                 for (std::size_t kk = kk_vec_end; kk < kkEnd; ++kk) {
                                     double a_val = A(ii, kk);
                                     sum0 += a_val * B(kk, jj + 0);
                                     sum1 += a_val * B(kk, jj + 1);
                                     sum2 += a_val * B(kk, jj + 2);
                                     sum3 += a_val * B(kk, jj + 3);
+                                    sum4 += a_val * B(kk, jj + 4);
+                                    sum5 += a_val * B(kk, jj + 5);
                                 }
                                 C(ii, jj + 0) = sum0;
                                 C(ii, jj + 1) = sum1;
                                 C(ii, jj + 2) = sum2;
                                 C(ii, jj + 3) = sum3;
+                                C(ii, jj + 4) = sum4;
+                                C(ii, jj + 5) = sum5;
                             }
                             for (; jj < jjEnd; ++jj) {
                                 T sum = C(ii, jj);
