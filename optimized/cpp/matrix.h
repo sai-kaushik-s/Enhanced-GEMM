@@ -27,13 +27,13 @@ private:
     std::size_t colSize;
     std::size_t packSize;
     std::vector<T> flatData;
-    std::vector<T*> data;
     std::size_t numCores;
-    std::size_t tileSize;
+
+    std::vector<T> packedData;
+    bool isPacked = false;
+    std::size_t packedMC, packedKC, packedNC;
 
     static constexpr bool IsTransposed = (Layout == StorageLayout::ColMajor);
-
-    void rebuildDataPointers();
 
 public:
     Matrix(std::size_t rows, std::size_t cols, std::size_t numCores);
@@ -50,13 +50,20 @@ public:
     void write(std::ostream& os) const;
     void initializeZero();
 
+    void packMatrix();
+
     std::size_t getRowSize() const;
     std::size_t getColSize() const;
     std::size_t getPackSize() const;
-    std::size_t getTileSize() const;
     std::size_t getNumCores() const;
-    T** getData();
-    const T* const* getData() const;
+    bool getIsPacked() const;
+    std::size_t getPackedMC() const;
+    std::size_t getPackedKC() const;
+    std::size_t getPackedNC() const;
+
+    T* getData();
+    const T* getData() const;
+    const T* getPackedData() const;
 
     T& operator()(std::size_t i, std::size_t j);
     const T& operator()(std::size_t i, std::size_t j) const;

@@ -1,5 +1,5 @@
 CXX := g++
-CXXFLAGS := -O3 -march=native -fopenmp -DNDEBUG -Ioptimized/cpp
+CXXFLAGS := -O3 -march=native -fopenmp -DNDEBUG -Ioptimized/cpp -g
 LDFLAGS := -fopenmp -lnuma
 
 SRC_DIR := optimized/cpp

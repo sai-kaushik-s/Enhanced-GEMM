@@ -11,33 +11,33 @@
 #endif
 
 template<typename T, StorageLayout Layout>
-void Matrix<T, Layout>::rebuildDataPointers() {
-    if constexpr (IsTransposed) {
-        data.resize(colSize);
-        for (std::size_t i = 0; i < colSize; ++i)
-            data[i] = &(flatData[i * rowSize]);
-    } else {
-        data.resize(rowSize);
-        for (std::size_t i = 0; i < rowSize; ++i)
-            data[i] = &(flatData[i * colSize]);
-    }
-}
-
-template<typename T, StorageLayout Layout>
 Matrix<T, Layout>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCores) : 
     rowSize(rows), 
     colSize(cols), 
     packSize(32 / sizeof(T)), 
     numCores(numCores)
 {
-    flatData.resize(rowSize * colSize); 
-    rebuildDataPointers();
-    
-    long l1dCacheSize = sysconf(_SC_LEVEL1_DCACHE_SIZE);
-    double elementSize = sizeof(double);
-    tileSize = static_cast<std::size_t>(std::sqrt(l1dCacheSize / (3 * elementSize)));
-    tileSize = (tileSize / 4) * 4;
-    if (tileSize < 4) { tileSize = 4; }
+    flatData.resize(rowSize * colSize);
+
+    long l2Size = sysconf(_SC_LEVEL2_CACHE_SIZE);
+    if (l2Size <= 0) l2Size = 512 * 1024;
+
+    packedMC = 128; 
+    packedKC = 256;
+    packedNC = 48;
+
+    std::size_t neededL2 = (packedMC * packedKC + packedNC * packedKC) * sizeof(T);
+
+    if (neededL2 > (std::size_t)(l2Size * 0.8)) {
+        double scale = (double)(l2Size * 0.8) / neededL2;
+        packedMC = std::max(std::size_t(64), (std::size_t)(packedMC * scale));
+        packedKC = std::max(std::size_t(128), (std::size_t)(packedKC * scale));
+        
+        if (scale < 0.5) packedNC = 24; 
+    }
+
+    packedNC = (packedNC / 6) * 6;
+    if (packedNC < 6) packedNC = 6;
 }
 
 template<typename T, StorageLayout Layout>
@@ -46,10 +46,13 @@ Matrix<T, Layout>::Matrix(const Matrix<T, Layout>& other) :
     colSize(other.colSize), 
     packSize(other.packSize), 
     flatData(other.flatData),
-    numCores(other.numCores), 
-    tileSize(other.tileSize)
+    numCores(other.numCores),
+    isPacked(other.isPacked),
+    packedMC(other.packedMC),
+    packedKC(other.packedKC),
+    packedNC(other.packedNC),
+    packedData(other.packedData)
 {
-    rebuildDataPointers();
 }
 
 template<typename T, StorageLayout Layout>
@@ -62,26 +65,33 @@ Matrix<T, Layout>& Matrix<T, Layout>::operator=(const Matrix<T, Layout>& other) 
     colSize = other.colSize;
     packSize = other.packSize;
     numCores = other.numCores;
-    tileSize = other.tileSize;
-    
-    rebuildDataPointers();
+    isPacked = other.isPacked;
+    packedMC = other.packedMC;
+    packedKC = other.packedKC;
+    packedNC = other.packedNC;
+    packedData = other.packedData;
 
     return *this;
 }
 
 template<typename T, StorageLayout Layout>
 void Matrix<T, Layout>::randomize(int seq_stride, int seq_offset) {
+    #pragma omp parallel for num_threads(numCores) schedule(static)
+    for (std::size_t i = 0; i < flatData.size(); ++i) {
+        flatData[i] = T(0);
+    }
+
     std::mt19937_64 rng(12345);
     std::normal_distribution<double> dist(0.0, 1.0);
 
     for (std::size_t i = 0; i < rowSize; ++i) {
         for (std::size_t j = 0; j < colSize; ++j) {
             for (int k = 0; k < seq_offset; ++k) {
-                 dist(rng);
+                dist(rng);
             }
             (*this)(i, j) = static_cast<T>(dist(rng));
             for (int k = seq_offset + 1; k < seq_stride; ++k) {
-                 dist(rng);
+                dist(rng);
             }
         }
     }
@@ -106,7 +116,7 @@ bool Matrix<T, Layout>::isIdentity() const {
     if (rowSize != colSize) { return false; }
 
     bool diagonal = true;
-    #pragma omp parallel for num_threads(getNumCores()) reduction(&&:diagonal) schedule(static, 1)
+    #pragma omp parallel for num_threads(getNumCores()) reduction(&&:diagonal) schedule(static)
     for (std::size_t i = 0; i < rowSize; ++i) {
         if ((*this)(i, i) != T(1)) {
             diagonal = false;
@@ -116,7 +126,7 @@ bool Matrix<T, Layout>::isIdentity() const {
     if (!diagonal) { return false; }
 
     bool offDiagonal = true;
-    #pragma omp parallel for num_threads(getNumCores()) reduction(&&:offDiagonal) collapse(2) schedule(static, 1)
+    #pragma omp parallel for num_threads(getNumCores()) reduction(&&:offDiagonal) collapse(2) schedule(static)
     for (std::size_t i = 0; i < rowSize; ++i) {
         for (std::size_t j = 0; j < colSize; ++j) {
             if (i != j && (*this)(i, j) != T(0)) {
@@ -131,7 +141,7 @@ bool Matrix<T, Layout>::isIdentity() const {
 template<typename T, StorageLayout Layout>
 bool Matrix<T, Layout>::isZero() const {
     bool allZero = true;
-    #pragma omp parallel for num_threads(getNumCores()) reduction(&&:allZero) collapse(2) schedule(static, 1)
+    #pragma omp parallel for num_threads(getNumCores()) reduction(&&:allZero) collapse(2) schedule(static)
     for (std::size_t i = 0; i < rowSize; ++i) {
         for (std::size_t j = 0; j < colSize; ++j) {
             if ((*this)(i, j) != T(0)) {
@@ -145,7 +155,7 @@ bool Matrix<T, Layout>::isZero() const {
 template<typename T, StorageLayout Layout>
 T Matrix<T, Layout>::getChecksum() const {
     T checksum = T(0);
-    #pragma omp parallel for num_threads(getNumCores()) reduction(+:checksum) collapse(2) schedule(static, 1)
+    #pragma omp parallel for num_threads(getNumCores()) reduction(+:checksum) collapse(2) schedule(static)
     for (std::size_t i = 0; i < rowSize; ++i) {
         for (std::size_t j = 0; j < colSize; ++j) {
             checksum += (*this)(i, j);
@@ -156,7 +166,7 @@ T Matrix<T, Layout>::getChecksum() const {
 
 template<typename T, StorageLayout Layout>
 void Matrix<T, Layout>::initializeZero() {
-    #pragma omp parallel for num_threads(getNumCores()) collapse(2) schedule(static, 1)
+    #pragma omp parallel for num_threads(getNumCores()) collapse(2) schedule(static)
     for (std::size_t i = 0; i < rowSize; ++i) {
         for (std::size_t j = 0; j < colSize; ++j) {
             (*this)(i, j) = T(0);
@@ -174,28 +184,51 @@ template<typename T, StorageLayout Layout>
 std::size_t Matrix<T, Layout>::getPackSize() const { return packSize; }
 
 template<typename T, StorageLayout Layout>
-std::size_t Matrix<T, Layout>::getTileSize() const { return tileSize; }
-
-template<typename T, StorageLayout Layout>
 std::size_t Matrix<T, Layout>::getNumCores() const { return numCores; }
 
 template<typename T, StorageLayout Layout>
-T** Matrix<T, Layout>::getData() { return data.data(); }
+bool Matrix<T, Layout>::getIsPacked() const { return isPacked; }
 
 template<typename T, StorageLayout Layout>
-const T* const* Matrix<T, Layout>::getData() const { return data.data(); }
+std::size_t Matrix<T, Layout>::getPackedMC() const { return packedMC; }
+
+template<typename T, StorageLayout Layout>
+std::size_t Matrix<T, Layout>::getPackedKC() const { return packedKC; }
+
+template<typename T, StorageLayout Layout>
+std::size_t Matrix<T, Layout>::getPackedNC() const { return packedNC; }
+
+template<typename T, StorageLayout Layout>
+const T* Matrix<T, Layout>::getPackedData() const { return packedData.data(); }
+
+template<typename T, StorageLayout Layout>
+T* Matrix<T, Layout>::getData() { return flatData.data(); }
+
+template<typename T, StorageLayout Layout>
+const T* Matrix<T, Layout>::getData() const { return flatData.data(); }
 
 template<typename T, StorageLayout Layout>
 T& Matrix<T, Layout>::operator()(std::size_t i, std::size_t j) {
-    if constexpr (IsTransposed) { return data[j][i]; } 
-    else { return data[i][j]; }
+    if constexpr (IsTransposed) { 
+        return flatData[j * rowSize + i]; 
+    } else { 
+        return flatData[i * colSize + j]; 
+    }
+}
+
+template<typename T, StorageLayout Layout>
+const T& Matrix<T, Layout>::operator()(std::size_t i, std::size_t j) const {
+    if constexpr (IsTransposed) { 
+        return flatData[j * rowSize + i]; 
+    } else { 
+        return flatData[i * colSize + j]; 
+    }
 }
 
 template<typename T, StorageLayout Layout>
 Matrix<T, (Layout == StorageLayout::RowMajor ? StorageLayout::ColMajor : StorageLayout::RowMajor)> Matrix<T, Layout>::transpose() const {
     Matrix<T, (Layout == StorageLayout::RowMajor ? StorageLayout::ColMajor : StorageLayout::RowMajor)> result(getColSize(), getRowSize(), getNumCores());
-
-    #pragma omp parallel for num_threads(getNumCores()) collapse(2) schedule(static, 1)
+    #pragma omp parallel for num_threads(getNumCores()) collapse(2) schedule(static)
     for (std::size_t i = 0; i < rowSize; ++i) {
         for (std::size_t j = 0; j < colSize; ++j) {
             result(j, i) = (*this)(i, j);
@@ -206,9 +239,46 @@ Matrix<T, (Layout == StorageLayout::RowMajor ? StorageLayout::ColMajor : Storage
 }
 
 template<typename T, StorageLayout Layout>
-const T& Matrix<T, Layout>::operator()(std::size_t i, std::size_t j) const {
-    if constexpr (IsTransposed) { return data[j][i]; } 
-    else { return data[i][j]; }
+void Matrix<T, Layout>::packMatrix() {
+    isPacked = true;
+
+    if constexpr (IsTransposed) {
+        std::size_t nBlocksK = (rowSize + packedKC - 1) / packedKC;
+        std::size_t nBlocksJ = (colSize + packedNC - 1) / packedNC;
+        packedData.resize(nBlocksK * nBlocksJ * packedKC * packedNC);
+
+        #pragma omp parallel for num_threads(numCores) collapse(2) schedule(static)
+        for (std::size_t j = 0; j < colSize; j += packedNC) {
+            for (std::size_t k = 0; k < rowSize; k += packedKC) {
+                std::size_t idx = (j / packedNC) * nBlocksK + (k / packedKC);
+                T* ptr = &packedData[idx * packedKC * packedNC];
+
+                for (std::size_t jj = j; jj < std::min(j + packedNC, colSize); ++jj) {
+                    for (std::size_t kk = k; kk < std::min(k + packedKC, rowSize); ++kk) {
+                        ptr[(jj - j) * packedKC + (kk - k)] = (*this)(kk, jj);
+                    }
+                }
+            }
+        }
+    } else {
+        std::size_t nBlocksI = (rowSize + packedMC - 1) / packedMC;
+        std::size_t nBlocksK = (colSize + packedKC - 1) / packedKC;
+        packedData.resize(nBlocksI * nBlocksK * packedMC * packedKC);
+
+        #pragma omp parallel for num_threads(numCores) collapse(2) schedule(static)
+        for (std::size_t i = 0; i < rowSize; i += packedMC) {
+            for (std::size_t k = 0; k < colSize; k += packedKC) {
+                std::size_t idx = (i / packedMC) * nBlocksK + (k / packedKC);
+                T* ptr = &packedData[idx * packedMC * packedKC];
+
+                for (std::size_t ii = i; ii < std::min(i + packedMC, rowSize); ++ii) {
+                    for (std::size_t kk = k; kk < std::min(k + packedKC, colSize); ++kk) {
+                        ptr[(ii - i) * packedKC + (kk - k)] = (*this)(ii, kk);
+                    }
+                }
+            }
+        }
+    }
 }
 
 static inline double hsum256_pd(__m256d v) {
@@ -222,114 +292,150 @@ static inline double hsum256_pd(__m256d v) {
 template<typename T, StorageLayout L_A, StorageLayout L_B, StorageLayout L_C>
 void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& C) {
     if constexpr (L_A == StorageLayout::RowMajor && L_B == StorageLayout::ColMajor && L_C == StorageLayout::RowMajor) {
-        if (A.getColSize() != B.getRowSize()) { throw std::invalid_argument("Dimension mismatch in multiply"); }
+        if (A.getColSize() != B.getRowSize()) {
+             throw std::invalid_argument("Dimension mismatch in multiply");
+        }
 
-        std::size_t tileSize = A.getTileSize();
         std::size_t aRows = A.getRowSize();
         std::size_t bCols = B.getColSize();
         std::size_t aCols = A.getColSize();
 
-        #pragma omp parallel for num_threads(A.getNumCores()) collapse(2) schedule(static, 1)
-        for (std::size_t i = 0; i < aRows; i += tileSize) {
-            for (std::size_t j = 0; j < bCols; j += tileSize) {
-                for (std::size_t k = 0; k < aCols; k += tileSize) {
-                    const std::size_t iiEnd = std::min(i + tileSize, aRows);
-                    const std::size_t jjEnd = std::min(j + tileSize, bCols);
-                    const std::size_t kkEnd = std::min(k + tileSize, aCols);
-                    #ifdef __AVX2__
-                        const std::size_t W = 4;
-                        std::size_t kk_vec_end = k + ((kkEnd - k) / W) * W;
-                        for (std::size_t ii = i; ii < iiEnd; ++ii) {
-                            std::size_t jj = j;
-                            const std::size_t jjUnrolledEnd = j + ((jjEnd - j) / 6) * 6;
-                            for (; jj < jjUnrolledEnd; jj += 6) {
-                                T sum0 = C(ii, jj + 0);
-                                T sum1 = C(ii, jj + 1);
-                                T sum2 = C(ii, jj + 2);
-                                T sum3 = C(ii, jj + 3);
-                                T sum4 = C(ii, jj + 4);
-                                T sum5 = C(ii, jj + 5);
-                                __m256d acc0 = _mm256_setzero_pd();
-                                __m256d acc1 = _mm256_setzero_pd();
-                                __m256d acc2 = _mm256_setzero_pd();
-                                __m256d acc3 = _mm256_setzero_pd();
-                                __m256d acc4 = _mm256_setzero_pd();
-                                __m256d acc5 = _mm256_setzero_pd();
-                                for (std::size_t kk = k; kk < kk_vec_end; kk += W) {
-                                    __m256d a = _mm256_loadu_pd(&A(ii, kk));
-                                    __m256d b0 = _mm256_loadu_pd(&B(kk, jj + 0));
-                                    __m256d b1 = _mm256_loadu_pd(&B(kk, jj + 1));
-                                    __m256d b2 = _mm256_loadu_pd(&B(kk, jj + 2));
-                                    __m256d b3 = _mm256_loadu_pd(&B(kk, jj + 3));
-                                    __m256d b4 = _mm256_loadu_pd(&B(kk, jj + 4));
-                                    __m256d b5 = _mm256_loadu_pd(&B(kk, jj + 5));
-                                    acc0 = _mm256_fmadd_pd(a, b0, acc0);
-                                    acc1 = _mm256_fmadd_pd(a, b1, acc1);
-                                    acc2 = _mm256_fmadd_pd(a, b2, acc2);
-                                    acc3 = _mm256_fmadd_pd(a, b3, acc3);
-                                    acc4 = _mm256_fmadd_pd(a, b4, acc4);
-                                    acc5 = _mm256_fmadd_pd(a, b5, acc5);
-                                }
-                                sum0 += hsum256_pd(acc0);
-                                sum1 += hsum256_pd(acc1);
-                                sum2 += hsum256_pd(acc2);
-                                sum3 += hsum256_pd(acc3);
-                                sum4 += hsum256_pd(acc4);
-                                sum5 += hsum256_pd(acc5);
-                                for (std::size_t kk = kk_vec_end; kk < kkEnd; ++kk) {
-                                    double a_val = A(ii, kk);
-                                    sum0 += a_val * B(kk, jj + 0);
-                                    sum1 += a_val * B(kk, jj + 1);
-                                    sum2 += a_val * B(kk, jj + 2);
-                                    sum3 += a_val * B(kk, jj + 3);
-                                    sum4 += a_val * B(kk, jj + 4);
-                                    sum5 += a_val * B(kk, jj + 5);
-                                }
-                                C(ii, jj + 0) = sum0;
-                                C(ii, jj + 1) = sum1;
-                                C(ii, jj + 2) = sum2;
-                                C(ii, jj + 3) = sum3;
-                                C(ii, jj + 4) = sum4;
-                                C(ii, jj + 5) = sum5;
-                            }
-                            for (; jj < jjEnd; ++jj) {
-                                T sum = C(ii, jj);
+        std::size_t MC = A.getPackedMC(); 
+        std::size_t KC = A.getPackedKC();
+        std::size_t NC = A.getPackedNC();
+
+        bool offlineA = A.getIsPacked();
+        bool offlineB = B.getIsPacked();
+
+        std::size_t nBBlocksK = (B.getRowSize() + KC - 1) / KC;
+        std::size_t nABlocksK = (A.getColSize() + KC - 1) / KC;
+
+        #pragma omp parallel num_threads(A.getNumCores())
+        {
+            std::vector<T> localPA(offlineA ? 0 : MC * KC);
+            std::vector<T> localPB(offlineB ? 0 : NC * KC);
+
+            #pragma omp for collapse(2) schedule(static)
+            for (std::size_t i = 0; i < aRows; i += MC) {
+                for (std::size_t j = 0; j < bCols; j += NC) {
+                    for (std::size_t k = 0; k < aCols; k += KC) {
+
+                        const T* ptrPA;
+                        const T* ptrPB;
+                        
+                        const std::size_t iiEnd = std::min(i + MC, aRows);
+                        const std::size_t jjEnd = std::min(j + NC, bCols);
+                        const std::size_t kkEnd = std::min(k + KC, aCols);
+
+                        if (offlineA) {
+                            std::size_t idx = (i / MC) * nABlocksK + (k / KC);
+                            ptrPA = A.getPackedData() + (idx * MC * KC);
+                        } else {
+                            for (std::size_t ii = i; ii < iiEnd; ++ii) {
                                 for (std::size_t kk = k; kk < kkEnd; ++kk) {
-                                    sum += A(ii, kk) * B(kk, jj);
+                                    localPA[(ii - i) * KC + (kk - k)] = A(ii, kk);
                                 }
-                                C(ii, jj) = sum;
                             }
+                            ptrPA = localPA.data();
                         }
-                    #else
-                        for (std::size_t ii = i; ii < iiEnd; ++ii) {
-                            std::size_t jj = j;
-                            const std::size_t jjUnrolledEnd = j + ((jjEnd - j) / 4) * 4;
-                            for (; jj < jjUnrolledEnd; jj += 4) {
-                                T sum0 = C(ii, jj + 0);
-                                T sum1 = C(ii, jj + 1);
-                                T sum2 = C(ii, jj + 2);
-                                T sum3 = C(ii, jj + 3);
+
+                        if (offlineB) {
+                            std::size_t idx = (j / NC) * nBBlocksK + (k / KC);
+                            ptrPB = B.getPackedData() + (idx * KC * NC);
+                        } else {
+                            for (std::size_t jj = j; jj < jjEnd; ++jj) {
                                 for (std::size_t kk = k; kk < kkEnd; ++kk) {
-                                    T a_val = A(ii, kk);
-                                    sum0 += a_val * B(kk, jj + 0);
-                                    sum1 += a_val * B(kk, jj + 1);
-                                    sum2 += a_val * B(kk, jj + 2);
-                                    sum3 += a_val * B(kk, jj + 3);
+                                    localPB[(jj - j) * KC + (kk - k)] = B(kk, jj);
                                 }
-                                C(ii, jj + 0) = sum0;
-                                C(ii, jj + 1) = sum1;
-                                C(ii, jj + 2) = sum2;
-                                C(ii, jj + 3) = sum3;
                             }
-                            for (; jj < jjEnd; ++jj) {
-                                T sum = C(ii, jj);
-                                for (std::size_t kk = k; kk < kkEnd; ++kk) {
-                                    sum += A(ii, kk) * B(kk, jj);
-                                }
-                                C(ii, jj) = sum;
-                            }
+                            ptrPB = localPB.data();
                         }
-                    #endif
+
+                        #ifdef __AVX2__
+                            const std::size_t W = 4;
+                            const std::size_t PF_DIST = 64;
+
+                            std::size_t kk_vec_end = k + ((kkEnd - k) / W) * W;
+
+                            for (std::size_t ii = i; ii < iiEnd; ++ii) {
+                                std::size_t jj = j;
+                                const std::size_t jjUnrolledEnd = j + ((jjEnd - j) / 6) * 6;
+                                for (; jj < jjUnrolledEnd; jj += 6) {
+                                    T sum0 = C(ii, jj + 0); 
+                                    T sum1 = C(ii, jj + 1);
+                                    T sum2 = C(ii, jj + 2);
+                                    T sum3 = C(ii, jj + 3);
+                                    T sum4 = C(ii, jj + 4);
+                                    T sum5 = C(ii, jj + 5);
+                                    __m256d acc0 = _mm256_setzero_pd();
+                                    __m256d acc1 = _mm256_setzero_pd();
+                                    __m256d acc2 = _mm256_setzero_pd();
+                                    __m256d acc3 = _mm256_setzero_pd();
+                                    __m256d acc4 = _mm256_setzero_pd();
+                                    __m256d acc5 = _mm256_setzero_pd();
+                                    for (std::size_t kk = k; kk < kk_vec_end; kk += W) {
+                                        _mm_prefetch((const char*)&ptrPA[(ii - i) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
+                                        _mm_prefetch((const char*)&ptrPB[(jj - j + 0) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
+                                        _mm_prefetch((const char*)&ptrPB[(jj - j + 1) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
+
+                                        __m256d a = _mm256_loadu_pd(&ptrPA[(ii - i) * KC + (kk - k)]);
+                                        __m256d b0 = _mm256_loadu_pd(&ptrPB[(jj - j + 0) * KC + (kk - k)]);
+                                        __m256d b1 = _mm256_loadu_pd(&ptrPB[(jj - j + 1) * KC + (kk - k)]);
+                                        __m256d b2 = _mm256_loadu_pd(&ptrPB[(jj - j + 2) * KC + (kk - k)]);
+                                        __m256d b3 = _mm256_loadu_pd(&ptrPB[(jj - j + 3) * KC + (kk - k)]);
+                                        __m256d b4 = _mm256_loadu_pd(&ptrPB[(jj - j + 4) * KC + (kk - k)]);
+                                        __m256d b5 = _mm256_loadu_pd(&ptrPB[(jj - j + 5) * KC + (kk - k)]);
+
+                                        acc0 = _mm256_fmadd_pd(a, b0, acc0);
+                                        acc1 = _mm256_fmadd_pd(a, b1, acc1);
+                                        acc2 = _mm256_fmadd_pd(a, b2, acc2);
+                                        acc3 = _mm256_fmadd_pd(a, b3, acc3);
+                                        acc4 = _mm256_fmadd_pd(a, b4, acc4);
+                                        acc5 = _mm256_fmadd_pd(a, b5, acc5);
+                                    }
+                                    sum0 += hsum256_pd(acc0);
+                                    sum1 += hsum256_pd(acc1);
+                                    sum2 += hsum256_pd(acc2);
+                                    sum3 += hsum256_pd(acc3);
+                                    sum4 += hsum256_pd(acc4);
+                                    sum5 += hsum256_pd(acc5);
+                                    for (std::size_t kk = kk_vec_end; kk < kkEnd; ++kk) {
+                                        double a_val = ptrPA[(ii - i) * KC + (kk - k)];
+                                        sum0 += a_val * ptrPB[(jj - j + 0) * KC + (kk - k)];
+                                        sum1 += a_val * ptrPB[(jj - j + 1) * KC + (kk - k)];
+                                        sum2 += a_val * ptrPB[(jj - j + 2) * KC + (kk - k)];
+                                        sum3 += a_val * ptrPB[(jj - j + 3) * KC + (kk - k)];
+                                        sum4 += a_val * ptrPB[(jj - j + 4) * KC + (kk - k)];
+                                        sum5 += a_val * ptrPB[(jj - j + 5) * KC + (kk - k)];
+                                    }
+                                    C(ii, jj + 0) = sum0;
+                                    C(ii, jj + 1) = sum1;
+                                    C(ii, jj + 2) = sum2;
+                                    C(ii, jj + 3) = sum3;
+                                    C(ii, jj + 4) = sum4;
+                                    C(ii, jj + 5) = sum5;
+                                }
+                                for (; jj < jjEnd; ++jj) {
+                                    T sum = C(ii, jj);
+                                    for (std::size_t kk = k; kk < kkEnd; ++kk) {
+                                        sum += ptrPA[(ii - i) * KC + (kk - k)] * ptrPB[(jj - j) * KC + (kk - k)];
+                                    }
+                                    C(ii, jj) = sum;
+                                }
+                            }
+                        #else
+                            for (std::size_t ii = i; ii < iiEnd; ++ii) {
+                                std::size_t jj = j;
+                                for (; jj < jjEnd; ++jj) {
+                                     T sum = C(ii, jj);
+                                     for (std::size_t kk = k; kk < kkEnd; ++kk) {
+                                         sum += ptrPA[(ii - i) * KC + (kk - k)] * ptrPB[(jj - j) * KC + (kk - k)];
+                                     }
+                                     C(ii, jj) = sum;
+                                }
+                            }
+                        #endif
+                    }
                 }
             }
         }
