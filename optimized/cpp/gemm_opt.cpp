@@ -17,7 +17,6 @@ Usage: ./gemm_opt N num_threads
 #include <string>
 #include <stdexcept>
 #include <omp.h>
-#include <numa.h>
 #include "matrix.h"
 
 int main(int argc, char** argv) {
@@ -41,8 +40,8 @@ int main(int argc, char** argv) {
     Matrix<double, StorageLayout::RowMajor> matA(N, N, T), matC(N, N, T);
     Matrix<double, StorageLayout::ColMajor> matB(N, N, T);
     
-    matA.randomize();
-    matB.randomize();
+    matA.randomize(2, 0);
+    matB.randomize(2, 1);
     matC.initializeZero();
 
     double t0 = omp_get_wtime();

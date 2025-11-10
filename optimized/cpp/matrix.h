@@ -45,7 +45,7 @@ public:
     
     ~Matrix() = default;
 
-    void randomize();
+    void randomize(int seq_stride, int seq_offset);
     void print() const;
     void write(std::ostream& os) const;
     void initializeZero();
