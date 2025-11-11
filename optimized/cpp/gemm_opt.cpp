@@ -44,10 +44,11 @@ int main(int argc, char** argv) {
     matB.randomize(2, 1);
     matC.initializeZero();
 
-    matA.packMatrix();
-    matB.packMatrix();
+
 
     double t0 = omp_get_wtime();
+    matA.packMatrix();
+    matB.packMatrix();
     multiply(matA, matB, matC);
     double t1 = omp_get_wtime();
     std::cout << "N=" << N << " T=" << T << " time=" << (t1 - t0) << " seconds\n";

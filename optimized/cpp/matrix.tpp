@@ -6,15 +6,16 @@
 #include <algorithm>
 #include <stdexcept>
 #include <unistd.h>
-#ifdef __AVX2__
+#if defined(__AVX2__) || defined(__AVX512F__)
     #include <immintrin.h>
 #endif
 
+
 template<typename T, StorageLayout Layout>
-Matrix<T, Layout>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCores) : 
-    rowSize(rows), 
-    colSize(cols), 
-    packSize(32 / sizeof(T)), 
+Matrix<T, Layout>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCores) :
+    rowSize(rows),
+    colSize(cols),
+    packSize(32 / sizeof(T)),
     numCores(numCores)
 {
     flatData.resize(rowSize * colSize);
@@ -22,7 +23,7 @@ Matrix<T, Layout>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCor
     long l2Size = sysconf(_SC_LEVEL2_CACHE_SIZE);
     if (l2Size <= 0) l2Size = 512 * 1024;
 
-    packedMC = 128; 
+    packedMC = 128;
     packedKC = 256;
     packedNC = 48;
 
@@ -32,8 +33,8 @@ Matrix<T, Layout>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCor
         double scale = (double)(l2Size * 0.8) / neededL2;
         packedMC = std::max(std::size_t(64), (std::size_t)(packedMC * scale));
         packedKC = std::max(std::size_t(128), (std::size_t)(packedKC * scale));
-        
-        if (scale < 0.5) packedNC = 24; 
+
+        if (scale < 0.5) packedNC = 24;
     }
 
     packedNC = (packedNC / 6) * 6;
@@ -41,10 +42,10 @@ Matrix<T, Layout>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCor
 }
 
 template<typename T, StorageLayout Layout>
-Matrix<T, Layout>::Matrix(const Matrix<T, Layout>& other) : 
-    rowSize(other.rowSize), 
-    colSize(other.colSize), 
-    packSize(other.packSize), 
+Matrix<T, Layout>::Matrix(const Matrix<T, Layout>& other) :
+    rowSize(other.rowSize),
+    colSize(other.colSize),
+    packSize(other.packSize),
     flatData(other.flatData),
     numCores(other.numCores),
     isPacked(other.isPacked),
@@ -59,8 +60,8 @@ template<typename T, StorageLayout Layout>
 Matrix<T, Layout>& Matrix<T, Layout>::operator=(const Matrix<T, Layout>& other) {
     if (this == &other) { return *this; }
 
-    flatData = other.flatData; 
-    
+    flatData = other.flatData;
+
     rowSize = other.rowSize;
     colSize = other.colSize;
     packSize = other.packSize;
@@ -122,7 +123,7 @@ bool Matrix<T, Layout>::isIdentity() const {
             diagonal = false;
         }
     }
-    
+
     if (!diagonal) { return false; }
 
     bool offDiagonal = true;
@@ -209,19 +210,19 @@ const T* Matrix<T, Layout>::getData() const { return flatData.data(); }
 
 template<typename T, StorageLayout Layout>
 T& Matrix<T, Layout>::operator()(std::size_t i, std::size_t j) {
-    if constexpr (IsTransposed) { 
-        return flatData[j * rowSize + i]; 
-    } else { 
-        return flatData[i * colSize + j]; 
+    if constexpr (IsTransposed) {
+        return flatData[j * rowSize + i];
+    } else {
+        return flatData[i * colSize + j];
     }
 }
 
 template<typename T, StorageLayout Layout>
 const T& Matrix<T, Layout>::operator()(std::size_t i, std::size_t j) const {
-    if constexpr (IsTransposed) { 
-        return flatData[j * rowSize + i]; 
-    } else { 
-        return flatData[i * colSize + j]; 
+    if constexpr (IsTransposed) {
+        return flatData[j * rowSize + i];
+    } else {
+        return flatData[i * colSize + j];
     }
 }
 
@@ -306,7 +307,7 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
         std::size_t bCols = B.getColSize();
         std::size_t aCols = A.getColSize();
 
-        std::size_t MC = A.getPackedMC(); 
+        std::size_t MC = A.getPackedMC();
         std::size_t KC = A.getPackedKC();
         std::size_t NC = A.getPackedNC();
 
@@ -328,7 +329,7 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
 
                         const T* ptrPA;
                         const T* ptrPB;
-                        
+
                         const std::size_t iiEnd = std::min(i + MC, aRows);
                         const std::size_t jjEnd = std::min(j + NC, bCols);
                         const std::size_t kkEnd = std::min(k + KC, aCols);
@@ -407,21 +408,25 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
                                 }
                             }
                         #elif defined(__AVX512F__)
-                            const std::size_t W = 8;           
-                            const std::size_t PF_DIST = 64;    
+                            const std::size_t W = 8;
+                            const std::size_t PF_DIST = 64;
 
                             std::size_t kk_vec_end = k + ((kkEnd - k) / W) * W;
 
                             for (std::size_t ii = i; ii < iiEnd; ++ii) {
                                 std::size_t jj = j;
 
-                                const std::size_t jjUnrolledEnd6 = j + ((jjEnd - j) / 6) * 6;
-                                for (; jj < jjUnrolledEnd6; jj += 6) {
+                                const std::size_t jjUnrolledEnd12 = j + ((jjEnd - j) / 12) * 12;
+                                for (; jj < jjUnrolledEnd12; jj += 12) {
                                     T sum0 = C(ii, jj + 0); T sum1 = C(ii, jj + 1); T sum2 = C(ii, jj + 2);
                                     T sum3 = C(ii, jj + 3); T sum4 = C(ii, jj + 4); T sum5 = C(ii, jj + 5);
+                                    T sum6 = C(ii, jj + 6); T sum7 = C(ii, jj + 7); T sum8 = C(ii, jj + 8);
+                                    T sum9 = C(ii, jj + 9); T sum10 = C(ii, jj + 10); T sum11 = C(ii, jj + 11);
 
                                     __m512d acc0 = _mm512_setzero_pd(); __m512d acc1 = _mm512_setzero_pd(); __m512d acc2 = _mm512_setzero_pd();
                                     __m512d acc3 = _mm512_setzero_pd(); __m512d acc4 = _mm512_setzero_pd(); __m512d acc5 = _mm512_setzero_pd();
+                                    __m512d acc6 = _mm512_setzero_pd(); __m512d acc7 = _mm512_setzero_pd(); __m512d acc8 = _mm512_setzero_pd();
+                                    __m512d acc9 = _mm512_setzero_pd(); __m512d acc10 = _mm512_setzero_pd(); __m512d acc11 = _mm512_setzero_pd();
 
                                     for (std::size_t kk = k; kk < kk_vec_end; kk += W) {
                                         _mm_prefetch((const char*)&ptrPA[(ii - i) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
@@ -432,9 +437,15 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
                                         __m512d b0 = _mm512_loadu_pd(&ptrPB[(jj - j + 0) * KC + (kk - k)]); __m512d b1 = _mm512_loadu_pd(&ptrPB[(jj - j + 1) * KC + (kk - k)]);
                                         __m512d b2 = _mm512_loadu_pd(&ptrPB[(jj - j + 2) * KC + (kk - k)]); __m512d b3 = _mm512_loadu_pd(&ptrPB[(jj - j + 3) * KC + (kk - k)]);
                                         __m512d b4 = _mm512_loadu_pd(&ptrPB[(jj - j + 4) * KC + (kk - k)]); __m512d b5 = _mm512_loadu_pd(&ptrPB[(jj - j + 5) * KC + (kk - k)]);
+                                        __m512d b6 = _mm512_loadu_pd(&ptrPB[(jj - j + 6) * KC + (kk - k)]); __m512d b7 = _mm512_loadu_pd(&ptrPB[(jj - j + 7) * KC + (kk - k)]);
+                                        __m512d b8 = _mm512_loadu_pd(&ptrPB[(jj - j + 8) * KC + (kk - k)]); __m512d b9 = _mm512_loadu_pd(&ptrPB[(jj - j + 9) * KC + (kk - k)]);
+                                        __m512d b10 = _mm512_loadu_pd(&ptrPB[(jj - j + 10) * KC + (kk - k)]); __m512d b11 = _mm512_loadu_pd(&ptrPB[(jj - j + 11) * KC + (kk - k)]);
 
                                         acc0 = _mm512_fmadd_pd(a, b0, acc0); acc1 = _mm512_fmadd_pd(a, b1, acc1); acc2 = _mm512_fmadd_pd(a, b2, acc2);
                                         acc3 = _mm512_fmadd_pd(a, b3, acc3); acc4 = _mm512_fmadd_pd(a, b4, acc4); acc5 = _mm512_fmadd_pd(a, b5, acc5);
+                                        acc6 = _mm512_fmadd_pd(a, b6, acc6); acc7 = _mm512_fmadd_pd(a, b7, acc7); acc8 = _mm512_fmadd_pd(a, b8, acc8);
+                                        acc9 = _mm512_fmadd_pd(a, b9, acc9); acc10 = _mm512_fmadd_pd(a, b10, acc10); acc11 = _mm512_fmadd_pd(a, b11, acc11);
+
                                     }
 
                                     {
@@ -449,17 +460,27 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
                                             __m512d b0 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 0 * KC]); __m512d b1 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 1 * KC]);
                                             __m512d b2 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 2 * KC]); __m512d b3 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 3 * KC]);
                                             __m512d b4 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 4 * KC]); __m512d b5 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 5 * KC]);
+                                            __m512d b6 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 6 * KC]); __m512d b7 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 7 * KC]);
+                                            __m512d b8 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 8 * KC]); __m512d b9 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 9 * KC]);
+                                            __m512d b10 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 10 * KC]); __m512d b11 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 11 * KC]);
 
                                             acc0 = _mm512_fmadd_pd(a, b0, acc0); acc1 = _mm512_fmadd_pd(a, b1, acc1); acc2 = _mm512_fmadd_pd(a, b2, acc2);
                                             acc3 = _mm512_fmadd_pd(a, b3, acc3); acc4 = _mm512_fmadd_pd(a, b4, acc4); acc5 = _mm512_fmadd_pd(a, b5, acc5);
+                                            acc6 = _mm512_fmadd_pd(a, b6, acc6); acc7 = _mm512_fmadd_pd(a, b7, acc7); acc8 = _mm512_fmadd_pd(a, b8, acc8);
+                                            acc9 = _mm512_fmadd_pd(a, b9, acc9); acc10 = _mm512_fmadd_pd(a, b10, acc10); acc11 = _mm512_fmadd_pd(a, b11, acc11);
                                         }
                                     }
 
                                     sum0 += hsum512_pd(acc0); sum1 += hsum512_pd(acc1); sum2 += hsum512_pd(acc2);
                                     sum3 += hsum512_pd(acc3); sum4 += hsum512_pd(acc4); sum5 += hsum512_pd(acc5);
+                                    sum6 += hsum512_pd(acc6); sum7 += hsum512_pd(acc7); sum8 += hsum512_pd(acc8);
+                                    sum9 += hsum512_pd(acc9); sum10 += hsum512_pd(acc10); sum11 += hsum512_pd(acc11);
 
                                     C(ii, jj + 0) = sum0;  C(ii, jj + 1) = sum1;  C(ii, jj + 2) = sum2;
                                     C(ii, jj + 3) = sum3;  C(ii, jj + 4) = sum4;  C(ii, jj + 5) = sum5;
+                                    C(ii, jj + 6) = sum6;  C(ii, jj + 7) = sum7;  C(ii, jj + 8) = sum8;
+                                    C(ii, jj + 9) = sum9;  C(ii, jj + 10) = sum10;  C(ii, jj + 11) = sum11;
+
                                 }
                                 for (; jj < jjEnd; ++jj) {
                                     T sum = C(ii, jj);
