@@ -20,6 +20,9 @@ class Matrix;
 template<typename T, StorageLayout L_A, StorageLayout L_B, StorageLayout L_C>
 void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& C);
 
+template<typename T, StorageLayout L_A, StorageLayout L_B, StorageLayout L_C>
+void initialize(Matrix<T, L_A>& A, Matrix<T, L_B>& B, Matrix<T, L_C>& C);
+
 template<typename T, StorageLayout Layout>
 class Matrix {
 private:
@@ -76,6 +79,8 @@ public:
 
     friend void multiply<>(const Matrix<T, StorageLayout::RowMajor>& A, const Matrix<T, StorageLayout::ColMajor>& B, Matrix<T, StorageLayout::RowMajor>& C);
     friend void multiply<>(const Matrix<T, StorageLayout::RowMajor>& A, const Matrix<T, StorageLayout::RowMajor>& B, Matrix<T, StorageLayout::RowMajor>& C);
+    friend void initialize<>(Matrix<T, StorageLayout::RowMajor>& A, Matrix<T, StorageLayout::ColMajor>& B, Matrix<T, StorageLayout::RowMajor>& C);
+    friend void initialize<>(Matrix<T, StorageLayout::RowMajor>& A, Matrix<T, StorageLayout::RowMajor>& B, Matrix<T, StorageLayout::RowMajor>& C);
 };
 
 #include "matrix.tpp"

@@ -6,9 +6,8 @@
 #include <algorithm>
 #include <stdexcept>
 #include <unistd.h>
-#if defined(__AVX2__) || defined(__AVX512F__)
-    #include <immintrin.h>
-#endif
+#include <immintrin.h>
+#include <cpuid.h>
 
 
 template<typename T, StorageLayout Layout>
@@ -19,6 +18,13 @@ Matrix<T, Layout>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCor
     numCores(numCores)
 {
     flatData.resize(rowSize * colSize);
+
+    T* data = flatData.data();
+    std::size_t totalSize = rowSize * colSize;
+    #pragma omp parallel for num_threads(numCores) schedule(static)
+    for (std::size_t i = 0; i < totalSize; ++i) {
+        data[i] = T(0);
+    }
 
     long l2Size = sysconf(_SC_LEVEL2_CACHE_SIZE);
     if (l2Size <= 0) l2Size = 512 * 1024;
@@ -282,6 +288,54 @@ void Matrix<T, Layout>::packMatrix() {
     }
 }
 
+static inline bool os_supports_avx() {
+    unsigned int eax, edx;
+    __asm__ volatile("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
+    return ((eax & 0x6) == 0x6);
+}
+
+static inline bool os_supports_avx512() {
+    unsigned int eax, edx;
+    __asm__ volatile("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
+    return ((eax & 0xE0) == 0xE0);
+}
+
+static inline bool has_avx2() {
+    unsigned int eax, ebx, ecx, edx;
+    if (!(__get_cpuid_max(0, NULL) >= 1))
+        return false;
+
+    __get_cpuid(1, &eax, &ebx, &ecx, &edx);
+    if (!(ecx & bit_OSXSAVE))
+        return false;
+
+    if (!os_supports_avx())
+        return false;
+
+    if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx))
+        return false;
+
+    return (ebx & bit_AVX2);
+}
+
+static inline bool has_avx512f() {
+    unsigned int eax, ebx, ecx, edx;
+    if (!(__get_cpuid_max(0, NULL) >= 1))
+        return false;
+
+    __get_cpuid(1, &eax, &ebx, &ecx, &edx);
+    if (!(ecx & bit_OSXSAVE))
+        return false;
+
+    if (!os_supports_avx512())
+        return false;
+
+    if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx))
+        return false;
+
+    return (ebx & bit_AVX512F);
+}
+
 static inline double hsum256_pd(__m256d v) {
     __m128d lo = _mm256_castpd256_pd128(v);
     __m128d hi = _mm256_extractf128_pd(v, 1);
@@ -296,12 +350,214 @@ static inline double hsum512_pd(__m512d v){
     return hsum256_pd(_mm256_add_pd(lo, hi));
 }
 
+template<typename T>
+using multiply_kernel_ptr = void(*)(
+    const Matrix<T, StorageLayout::RowMajor>& A, 
+    const Matrix<T, StorageLayout::ColMajor>& B, 
+    Matrix<T, StorageLayout::RowMajor>& C,
+    std::size_t i, std::size_t j, std::size_t k,
+    std::size_t iiEnd, std::size_t jjEnd, std::size_t kkEnd,
+    const T* ptrPA, const T* ptrPB);
+
+template<typename T>
+__attribute__((target("avx512f")))
+void multiply_kernel_avx512(
+    const Matrix<T, StorageLayout::RowMajor>& A, 
+    const Matrix<T, StorageLayout::ColMajor>& B, 
+    Matrix<T, StorageLayout::RowMajor>& C,
+    std::size_t i, std::size_t j, std::size_t k,
+    std::size_t iiEnd, std::size_t jjEnd, std::size_t kkEnd,
+    const T* ptrPA, const T* ptrPB)
+{
+    std::size_t KC = A.getPackedKC();
+    const std::size_t W = 8;
+    const std::size_t PF_DIST = 64;
+
+    std::size_t kk_vec_end = k + ((kkEnd - k) / W) * W;
+
+    for (std::size_t ii = i; ii < iiEnd; ++ii) {
+        std::size_t jj = j;
+
+        const std::size_t jjUnrolledEnd12 = j + ((jjEnd - j) / 12) * 12;
+        for (; jj < jjUnrolledEnd12; jj += 12) {
+            T sum0 = C(ii, jj + 0); T sum1 = C(ii, jj + 1); T sum2 = C(ii, jj + 2);
+            T sum3 = C(ii, jj + 3); T sum4 = C(ii, jj + 4); T sum5 = C(ii, jj + 5);
+            T sum6 = C(ii, jj + 6); T sum7 = C(ii, jj + 7); T sum8 = C(ii, jj + 8);
+            T sum9 = C(ii, jj + 9); T sum10 = C(ii, jj + 10); T sum11 = C(ii, jj + 11);
+
+            __m512d acc0 = _mm512_setzero_pd(); __m512d acc1 = _mm512_setzero_pd(); __m512d acc2 = _mm512_setzero_pd();
+            __m512d acc3 = _mm512_setzero_pd(); __m512d acc4 = _mm512_setzero_pd(); __m512d acc5 = _mm512_setzero_pd();
+            __m512d acc6 = _mm512_setzero_pd(); __m512d acc7 = _mm512_setzero_pd(); __m512d acc8 = _mm512_setzero_pd();
+            __m512d acc9 = _mm512_setzero_pd(); __m512d acc10 = _mm512_setzero_pd(); __m512d acc11 = _mm512_setzero_pd();
+
+            for (std::size_t kk = k; kk < kk_vec_end; kk += W) {
+                _mm_prefetch((const char*)&ptrPA[(ii - i) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
+                _mm_prefetch((const char*)&ptrPB[(jj - j + 0) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
+                _mm_prefetch((const char*)&ptrPB[(jj - j + 1) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
+
+                __m512d a  = _mm512_loadu_pd(&ptrPA[(ii - i) * KC + (kk - k)]);
+                __m512d b0 = _mm512_loadu_pd(&ptrPB[(jj - j + 0) * KC + (kk - k)]); __m512d b1 = _mm512_loadu_pd(&ptrPB[(jj - j + 1) * KC + (kk - k)]);
+                __m512d b2 = _mm512_loadu_pd(&ptrPB[(jj - j + 2) * KC + (kk - k)]); __m512d b3 = _mm512_loadu_pd(&ptrPB[(jj - j + 3) * KC + (kk - k)]);
+                __m512d b4 = _mm512_loadu_pd(&ptrPB[(jj - j + 4) * KC + (kk - k)]); __m512d b5 = _mm512_loadu_pd(&ptrPB[(jj - j + 5) * KC + (kk - k)]);
+                __m512d b6 = _mm512_loadu_pd(&ptrPB[(jj - j + 6) * KC + (kk - k)]); __m512d b7 = _mm512_loadu_pd(&ptrPB[(jj - j + 7) * KC + (kk - k)]);
+                __m512d b8 = _mm512_loadu_pd(&ptrPB[(jj - j + 8) * KC + (kk - k)]); __m512d b9 = _mm512_loadu_pd(&ptrPB[(jj - j + 9) * KC + (kk - k)]);
+                __m512d b10 = _mm512_loadu_pd(&ptrPB[(jj - j + 10) * KC + (kk - k)]); __m512d b11 = _mm512_loadu_pd(&ptrPB[(jj - j + 11) * KC + (kk - k)]);
+
+                acc0 = _mm512_fmadd_pd(a, b0, acc0); acc1 = _mm512_fmadd_pd(a, b1, acc1); acc2 = _mm512_fmadd_pd(a, b2, acc2);
+                acc3 = _mm512_fmadd_pd(a, b3, acc3); acc4 = _mm512_fmadd_pd(a, b4, acc4); acc5 = _mm512_fmadd_pd(a, b5, acc5);
+                acc6 = _mm512_fmadd_pd(a, b6, acc6); acc7 = _mm512_fmadd_pd(a, b7, acc7); acc8 = _mm512_fmadd_pd(a, b8, acc8);
+                acc9 = _mm512_fmadd_pd(a, b9, acc9); acc10 = _mm512_fmadd_pd(a, b10, acc10); acc11 = _mm512_fmadd_pd(a, b11, acc11);
+            }
+
+            {
+                const int rem = static_cast<int>(kkEnd - kk_vec_end);
+                if (rem > 0) {
+                    const __mmask8 m = (1u << rem) - 1u;
+                    const std::size_t base = (ii - i) * KC + (kk_vec_end - k);
+                    const std::size_t baseB0 = (jj - j + 0) * KC + (kk_vec_end - k);
+
+                    __m512d a  = _mm512_maskz_loadu_pd(m, &ptrPA[base]);
+
+                    __m512d b0 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 0 * KC]); __m512d b1 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 1 * KC]);
+                    __m512d b2 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 2 * KC]); __m512d b3 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 3 * KC]);
+                    __m512d b4 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 4 * KC]); __m512d b5 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 5 * KC]);
+                    __m512d b6 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 6 * KC]); __m512d b7 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 7 * KC]);
+                    __m512d b8 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 8 * KC]); __m512d b9 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 9 * KC]);
+                    __m512d b10 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 10 * KC]); __m512d b11 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 11 * KC]);
+
+                    acc0 = _mm512_fmadd_pd(a, b0, acc0); acc1 = _mm512_fmadd_pd(a, b1, acc1); acc2 = _mm512_fmadd_pd(a, b2, acc2);
+                    acc3 = _mm512_fmadd_pd(a, b3, acc3); acc4 = _mm512_fmadd_pd(a, b4, acc4); acc5 = _mm512_fmadd_pd(a, b5, acc5);
+                    acc6 = _mm512_fmadd_pd(a, b6, acc6); acc7 = _mm512_fmadd_pd(a, b7, acc7); acc8 = _mm512_fmadd_pd(a, b8, acc8);
+                    acc9 = _mm512_fmadd_pd(a, b9, acc9); acc10 = _mm512_fmadd_pd(a, b10, acc10); acc11 = _mm512_fmadd_pd(a, b11, acc11);
+                }
+            }
+
+            sum0 += hsum512_pd(acc0); sum1 += hsum512_pd(acc1); sum2 += hsum512_pd(acc2);
+            sum3 += hsum512_pd(acc3); sum4 += hsum512_pd(acc4); sum5 += hsum512_pd(acc5);
+            sum6 += hsum512_pd(acc6); sum7 += hsum512_pd(acc7); sum8 += hsum512_pd(acc8);
+            sum9 += hsum512_pd(acc9); sum10 += hsum512_pd(acc10); sum11 += hsum512_pd(acc11);
+
+            C(ii, jj + 0) = sum0;  C(ii, jj + 1) = sum1;  C(ii, jj + 2) = sum2;
+            C(ii, jj + 3) = sum3;  C(ii, jj + 4) = sum4;  C(ii, jj + 5) = sum5;
+            C(ii, jj + 6) = sum6;  C(ii, jj + 7) = sum7;  C(ii, jj + 8) = sum8;
+            C(ii, jj + 9) = sum9;  C(ii, jj + 10) = sum10;  C(ii, jj + 11) = sum11;
+        }
+        for (; jj < jjEnd; ++jj) {
+            T sum = C(ii, jj);
+            for (std::size_t kk = k; kk < kkEnd; ++kk) {
+                sum = std::fma(ptrPA[(ii - i) * KC + (kk - k)],
+                            ptrPB[(jj - j) * KC + (kk - k)], sum);
+            }
+            C(ii, jj) = sum;
+        }
+    }
+}
+
+
+template<typename T>
+__attribute__((target("avx2")))
+void multiply_kernel_avx2(
+    const Matrix<T, StorageLayout::RowMajor>& A, 
+    const Matrix<T, StorageLayout::ColMajor>& B, 
+    Matrix<T, StorageLayout::RowMajor>& C,
+    std::size_t i, std::size_t j, std::size_t k,
+    std::size_t iiEnd, std::size_t jjEnd, std::size_t kkEnd,
+    const T* ptrPA, const T* ptrPB)
+{
+    std::size_t KC = A.getPackedKC();
+    const std::size_t W = 4;
+    const std::size_t PF_DIST = 64;
+
+    std::size_t kk_vec_end = k + ((kkEnd - k) / W) * W;
+
+    for (std::size_t ii = i; ii < iiEnd; ++ii) {
+        std::size_t jj = j;
+        const std::size_t jjUnrolledEnd = j + ((jjEnd - j) / 6) * 6;
+        for (; jj < jjUnrolledEnd; jj += 6) {
+            T sum0 = C(ii, jj + 0); T sum1 = C(ii, jj + 1); T sum2 = C(ii, jj + 2);
+            T sum3 = C(ii, jj + 3); T sum4 = C(ii, jj + 4); T sum5 = C(ii, jj + 5);
+            __m256d acc0 = _mm256_setzero_pd(); __m256d acc1 = _mm256_setzero_pd();
+            __m256d acc2 = _mm256_setzero_pd(); __m256d acc3 = _mm256_setzero_pd();
+            __m256d acc4 = _mm256_setzero_pd(); __m256d acc5 = _mm256_setzero_pd();
+            for (std::size_t kk = k; kk < kk_vec_end; kk += W) {
+                _mm_prefetch((const char*)&ptrPA[(ii - i) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
+                _mm_prefetch((const char*)&ptrPB[(jj - j + 0) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
+                _mm_prefetch((const char*)&ptrPB[(jj - j + 1) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
+
+                __m256d a = _mm256_loadu_pd(&ptrPA[(ii - i) * KC + (kk - k)]);
+                __m256d b0 = _mm256_loadu_pd(&ptrPB[(jj - j + 0) * KC + (kk - k)]); __m256d b1 = _mm256_loadu_pd(&ptrPB[(jj - j + 1) * KC + (kk - k)]);
+                __m256d b2 = _mm256_loadu_pd(&ptrPB[(jj - j + 2) * KC + (kk - k)]); __m256d b3 = _mm256_loadu_pd(&ptrPB[(jj - j + 3) * KC + (kk - k)]);
+                __m256d b4 = _mm256_loadu_pd(&ptrPB[(jj - j + 4) * KC + (kk - k)]); __m256d b5 = _mm256_loadu_pd(&ptrPB[(jj - j + 5) * KC + (kk - k)]);
+
+                acc0 = _mm256_fmadd_pd(a, b0, acc0); acc1 = _mm256_fmadd_pd(a, b1, acc1); acc2 = _mm256_fmadd_pd(a, b2, acc2);
+                acc3 = _mm256_fmadd_pd(a, b3, acc3); acc4 = _mm256_fmadd_pd(a, b4, acc4); acc5 = _mm256_fmadd_pd(a, b5, acc5);
+            }
+            sum0 += hsum256_pd(acc0); sum1 += hsum256_pd(acc1); sum2 += hsum256_pd(acc2);
+            sum3 += hsum256_pd(acc3); sum4 += hsum256_pd(acc4); sum5 += hsum256_pd(acc5);
+            for (std::size_t kk = kk_vec_end; kk < kkEnd; ++kk) {
+                double a_val = ptrPA[(ii - i) * KC + (kk - k)];
+                sum0 += a_val * ptrPB[(jj - j + 0) * KC + (kk - k)]; sum1 += a_val * ptrPB[(jj - j + 1) * KC + (kk - k)];
+                sum2 += a_val * ptrPB[(jj - j + 2) * KC + (kk - k)]; sum3 += a_val * ptrPB[(jj - j + 3) * KC + (kk - k)];
+                sum4 += a_val * ptrPB[(jj - j + 4) * KC + (kk - k)]; sum5 += a_val * ptrPB[(jj - j + 5) * KC + (kk - k)];
+            }
+
+            C(ii, jj + 0) = sum0;  C(ii, jj + 1) = sum1;  C(ii, jj + 2) = sum2;
+            C(ii, jj + 3) = sum3;  C(ii, jj + 4) = sum4;  C(ii, jj + 5) = sum5;
+        }
+        for (; jj < jjEnd; ++jj) {
+            T sum = C(ii, jj);
+            for (std::size_t kk = k; kk < kkEnd; ++kk) {
+                sum = std::fma(ptrPA[(ii - i) * KC + (kk - k)],
+                            ptrPB[(jj - j) * KC + (kk - k)], sum);
+            }
+            C(ii, jj) = sum;
+        }
+    }
+}
+
+template<typename T>
+void multiply_kernel_scalar(
+    const Matrix<T, StorageLayout::RowMajor>& A, 
+    const Matrix<T, StorageLayout::ColMajor>& B, 
+    Matrix<T, StorageLayout::RowMajor>& C,
+    std::size_t i, std::size_t j, std::size_t k,
+    std::size_t iiEnd, std::size_t jjEnd, std::size_t kkEnd,
+    const T* ptrPA, const T* ptrPB)
+{
+    std::size_t KC = A.getPackedKC();
+    for (std::size_t ii = i; ii < iiEnd; ++ii) {
+        std::size_t jj = j;
+        for (; jj < jjEnd; ++jj) {
+             T sum = C(ii, jj);
+             for (std::size_t kk = k; kk < kkEnd; ++kk) {
+                sum = std::fma(ptrPA[(ii - i) * KC + (kk - k)],
+                            ptrPB[(jj - j) * KC + (kk - k)], sum);
+             }
+             C(ii, jj) = sum;
+        }
+    }
+}
+
+template<typename T>
+multiply_kernel_ptr<T> resolve_multiply_kernel() {
+    if (has_avx512f()) {
+        return &multiply_kernel_avx512<T>;
+    } else if (has_avx2()) {
+        return &multiply_kernel_avx2<T>;
+    } else {
+        return &multiply_kernel_scalar<T>;
+    }
+}
+
+
 template<typename T, StorageLayout L_A, StorageLayout L_B, StorageLayout L_C>
 void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& C) {
     if constexpr (L_A == StorageLayout::RowMajor && L_B == StorageLayout::ColMajor && L_C == StorageLayout::RowMajor) {
         if (A.getColSize() != B.getRowSize()) {
              throw std::invalid_argument("Dimension mismatch in multiply");
         }
+
+        static multiply_kernel_ptr<T> kernel = resolve_multiply_kernel<T>();
 
         std::size_t aRows = A.getRowSize();
         std::size_t bCols = B.getColSize();
@@ -311,16 +567,10 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
         std::size_t KC = A.getPackedKC();
         std::size_t NC = A.getPackedNC();
 
-        bool offlineA = A.getIsPacked();
-        bool offlineB = B.getIsPacked();
-
-        std::size_t nBBlocksK = (B.getRowSize() + KC - 1) / KC;
-        std::size_t nABlocksK = (A.getColSize() + KC - 1) / KC;
-
         #pragma omp parallel num_threads(A.getNumCores())
         {
-            std::vector<T> localPA(offlineA ? 0 : MC * KC);
-            std::vector<T> localPB(offlineB ? 0 : NC * KC);
+            std::vector<T> localPA(MC * KC);
+            std::vector<T> localPB(NC * KC);
 
             #pragma omp for collapse(2) schedule(static)
             for (std::size_t i = 0; i < aRows; i += MC) {
@@ -334,176 +584,21 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
                         const std::size_t jjEnd = std::min(j + NC, bCols);
                         const std::size_t kkEnd = std::min(k + KC, aCols);
 
-                        if (offlineA) {
-                            std::size_t idx = (i / MC) * nABlocksK + (k / KC);
-                            ptrPA = A.getPackedData() + (idx * MC * KC);
-                        } else {
-                            for (std::size_t ii = i; ii < iiEnd; ++ii) {
-                                for (std::size_t kk = k; kk < kkEnd; ++kk) {
-                                    localPA[(ii - i) * KC + (kk - k)] = A(ii, kk);
-                                }
+                        for (std::size_t ii = i; ii < iiEnd; ++ii) {
+                            for (std::size_t kk = k; kk < kkEnd; ++kk) {
+                                localPA[(ii - i) * KC + (kk - k)] = A(ii, kk);
                             }
-                            ptrPA = localPA.data();
                         }
-
-                        if (offlineB) {
-                            std::size_t idx = (j / NC) * nBBlocksK + (k / KC);
-                            ptrPB = B.getPackedData() + (idx * KC * NC);
-                        } else {
-                            for (std::size_t jj = j; jj < jjEnd; ++jj) {
-                                for (std::size_t kk = k; kk < kkEnd; ++kk) {
-                                    localPB[(jj - j) * KC + (kk - k)] = B(kk, jj);
-                                }
+                        ptrPA = localPA.data();
+    
+                        for (std::size_t jj = j; jj < jjEnd; ++jj) {
+                            for (std::size_t kk = k; kk < kkEnd; ++kk) {
+                                localPB[(jj - j) * KC + (kk - k)] = B(kk, jj);
                             }
-                            ptrPB = localPB.data();
                         }
+                        ptrPB = localPB.data();
 
-                        #ifdef __AVX2__
-                            const std::size_t W = 4;
-                            const std::size_t PF_DIST = 64;
-
-                            std::size_t kk_vec_end = k + ((kkEnd - k) / W) * W;
-
-                            for (std::size_t ii = i; ii < iiEnd; ++ii) {
-                                std::size_t jj = j;
-                                const std::size_t jjUnrolledEnd = j + ((jjEnd - j) / 6) * 6;
-                                for (; jj < jjUnrolledEnd; jj += 6) {
-                                    T sum0 = C(ii, jj + 0); T sum1 = C(ii, jj + 1); T sum2 = C(ii, jj + 2);
-                                    T sum3 = C(ii, jj + 3); T sum4 = C(ii, jj + 4); T sum5 = C(ii, jj + 5);
-                                    __m256d acc0 = _mm256_setzero_pd(); __m256d acc1 = _mm256_setzero_pd();
-                                    __m256d acc2 = _mm256_setzero_pd(); __m256d acc3 = _mm256_setzero_pd();
-                                    __m256d acc4 = _mm256_setzero_pd(); __m256d acc5 = _mm256_setzero_pd();
-                                    for (std::size_t kk = k; kk < kk_vec_end; kk += W) {
-                                        _mm_prefetch((const char*)&ptrPA[(ii - i) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
-                                        _mm_prefetch((const char*)&ptrPB[(jj - j + 0) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
-                                        _mm_prefetch((const char*)&ptrPB[(jj - j + 1) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
-
-                                        __m256d a = _mm256_loadu_pd(&ptrPA[(ii - i) * KC + (kk - k)]);
-                                        __m256d b0 = _mm256_loadu_pd(&ptrPB[(jj - j + 0) * KC + (kk - k)]); __m256d b1 = _mm256_loadu_pd(&ptrPB[(jj - j + 1) * KC + (kk - k)]);
-                                        __m256d b2 = _mm256_loadu_pd(&ptrPB[(jj - j + 2) * KC + (kk - k)]); __m256d b3 = _mm256_loadu_pd(&ptrPB[(jj - j + 3) * KC + (kk - k)]);
-                                        __m256d b4 = _mm256_loadu_pd(&ptrPB[(jj - j + 4) * KC + (kk - k)]); __m256d b5 = _mm256_loadu_pd(&ptrPB[(jj - j + 5) * KC + (kk - k)]);
-
-                                        acc0 = _mm256_fmadd_pd(a, b0, acc0); acc1 = _mm256_fmadd_pd(a, b1, acc1); acc2 = _mm256_fmadd_pd(a, b2, acc2);
-                                        acc3 = _mm256_fmadd_pd(a, b3, acc3); acc4 = _mm256_fmadd_pd(a, b4, acc4); acc5 = _mm256_fmadd_pd(a, b5, acc5);
-                                    }
-                                    sum0 += hsum256_pd(acc0); sum1 += hsum256_pd(acc1); sum2 += hsum256_pd(acc2);
-                                    sum3 += hsum256_pd(acc3); sum4 += hsum256_pd(acc4); sum5 += hsum256_pd(acc5);
-                                    for (std::size_t kk = kk_vec_end; kk < kkEnd; ++kk) {
-                                        double a_val = ptrPA[(ii - i) * KC + (kk - k)];
-                                        sum0 += a_val * ptrPB[(jj - j + 0) * KC + (kk - k)]; sum1 += a_val * ptrPB[(jj - j + 1) * KC + (kk - k)];
-                                        sum2 += a_val * ptrPB[(jj - j + 2) * KC + (kk - k)]; sum3 += a_val * ptrPB[(jj - j + 3) * KC + (kk - k)];
-                                        sum4 += a_val * ptrPB[(jj - j + 4) * KC + (kk - k)]; sum5 += a_val * ptrPB[(jj - j + 5) * KC + (kk - k)];
-                                    }
-
-                                    C(ii, jj + 0) = sum0;  C(ii, jj + 1) = sum1;  C(ii, jj + 2) = sum2;
-                                    C(ii, jj + 3) = sum3;  C(ii, jj + 4) = sum4;  C(ii, jj + 5) = sum5;
-                                }
-                                for (; jj < jjEnd; ++jj) {
-                                    T sum = C(ii, jj);
-                                    for (std::size_t kk = k; kk < kkEnd; ++kk) {
-                                        sum = std::fma(ptrPA[(ii - i) * KC + (kk - k)],
-                                                    ptrPB[(jj - j) * KC + (kk - k)], sum);
-                                    }
-                                    C(ii, jj) = sum;
-                                }
-                            }
-                        #elif defined(__AVX512F__)
-                            const std::size_t W = 8;
-                            const std::size_t PF_DIST = 64;
-
-                            std::size_t kk_vec_end = k + ((kkEnd - k) / W) * W;
-
-                            for (std::size_t ii = i; ii < iiEnd; ++ii) {
-                                std::size_t jj = j;
-
-                                const std::size_t jjUnrolledEnd12 = j + ((jjEnd - j) / 12) * 12;
-                                for (; jj < jjUnrolledEnd12; jj += 12) {
-                                    T sum0 = C(ii, jj + 0); T sum1 = C(ii, jj + 1); T sum2 = C(ii, jj + 2);
-                                    T sum3 = C(ii, jj + 3); T sum4 = C(ii, jj + 4); T sum5 = C(ii, jj + 5);
-                                    T sum6 = C(ii, jj + 6); T sum7 = C(ii, jj + 7); T sum8 = C(ii, jj + 8);
-                                    T sum9 = C(ii, jj + 9); T sum10 = C(ii, jj + 10); T sum11 = C(ii, jj + 11);
-
-                                    __m512d acc0 = _mm512_setzero_pd(); __m512d acc1 = _mm512_setzero_pd(); __m512d acc2 = _mm512_setzero_pd();
-                                    __m512d acc3 = _mm512_setzero_pd(); __m512d acc4 = _mm512_setzero_pd(); __m512d acc5 = _mm512_setzero_pd();
-                                    __m512d acc6 = _mm512_setzero_pd(); __m512d acc7 = _mm512_setzero_pd(); __m512d acc8 = _mm512_setzero_pd();
-                                    __m512d acc9 = _mm512_setzero_pd(); __m512d acc10 = _mm512_setzero_pd(); __m512d acc11 = _mm512_setzero_pd();
-
-                                    for (std::size_t kk = k; kk < kk_vec_end; kk += W) {
-                                        _mm_prefetch((const char*)&ptrPA[(ii - i) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
-                                        _mm_prefetch((const char*)&ptrPB[(jj - j + 0) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
-                                        _mm_prefetch((const char*)&ptrPB[(jj - j + 1) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
-
-                                        __m512d a  = _mm512_loadu_pd(&ptrPA[(ii - i) * KC + (kk - k)]);
-                                        __m512d b0 = _mm512_loadu_pd(&ptrPB[(jj - j + 0) * KC + (kk - k)]); __m512d b1 = _mm512_loadu_pd(&ptrPB[(jj - j + 1) * KC + (kk - k)]);
-                                        __m512d b2 = _mm512_loadu_pd(&ptrPB[(jj - j + 2) * KC + (kk - k)]); __m512d b3 = _mm512_loadu_pd(&ptrPB[(jj - j + 3) * KC + (kk - k)]);
-                                        __m512d b4 = _mm512_loadu_pd(&ptrPB[(jj - j + 4) * KC + (kk - k)]); __m512d b5 = _mm512_loadu_pd(&ptrPB[(jj - j + 5) * KC + (kk - k)]);
-                                        __m512d b6 = _mm512_loadu_pd(&ptrPB[(jj - j + 6) * KC + (kk - k)]); __m512d b7 = _mm512_loadu_pd(&ptrPB[(jj - j + 7) * KC + (kk - k)]);
-                                        __m512d b8 = _mm512_loadu_pd(&ptrPB[(jj - j + 8) * KC + (kk - k)]); __m512d b9 = _mm512_loadu_pd(&ptrPB[(jj - j + 9) * KC + (kk - k)]);
-                                        __m512d b10 = _mm512_loadu_pd(&ptrPB[(jj - j + 10) * KC + (kk - k)]); __m512d b11 = _mm512_loadu_pd(&ptrPB[(jj - j + 11) * KC + (kk - k)]);
-
-                                        acc0 = _mm512_fmadd_pd(a, b0, acc0); acc1 = _mm512_fmadd_pd(a, b1, acc1); acc2 = _mm512_fmadd_pd(a, b2, acc2);
-                                        acc3 = _mm512_fmadd_pd(a, b3, acc3); acc4 = _mm512_fmadd_pd(a, b4, acc4); acc5 = _mm512_fmadd_pd(a, b5, acc5);
-                                        acc6 = _mm512_fmadd_pd(a, b6, acc6); acc7 = _mm512_fmadd_pd(a, b7, acc7); acc8 = _mm512_fmadd_pd(a, b8, acc8);
-                                        acc9 = _mm512_fmadd_pd(a, b9, acc9); acc10 = _mm512_fmadd_pd(a, b10, acc10); acc11 = _mm512_fmadd_pd(a, b11, acc11);
-
-                                    }
-
-                                    {
-                                        const int rem = static_cast<int>(kkEnd - kk_vec_end);
-                                        if (rem > 0) {
-                                            const __mmask8 m = (1u << rem) - 1u;
-                                            const std::size_t base = (ii - i) * KC + (kk_vec_end - k);
-                                            const std::size_t baseB0 = (jj - j + 0) * KC + (kk_vec_end - k);
-
-                                            __m512d a  = _mm512_maskz_loadu_pd(m, &ptrPA[base]);
-
-                                            __m512d b0 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 0 * KC]); __m512d b1 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 1 * KC]);
-                                            __m512d b2 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 2 * KC]); __m512d b3 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 3 * KC]);
-                                            __m512d b4 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 4 * KC]); __m512d b5 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 5 * KC]);
-                                            __m512d b6 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 6 * KC]); __m512d b7 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 7 * KC]);
-                                            __m512d b8 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 8 * KC]); __m512d b9 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 9 * KC]);
-                                            __m512d b10 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 10 * KC]); __m512d b11 = _mm512_maskz_loadu_pd(m, &ptrPB[baseB0 + 11 * KC]);
-
-                                            acc0 = _mm512_fmadd_pd(a, b0, acc0); acc1 = _mm512_fmadd_pd(a, b1, acc1); acc2 = _mm512_fmadd_pd(a, b2, acc2);
-                                            acc3 = _mm512_fmadd_pd(a, b3, acc3); acc4 = _mm512_fmadd_pd(a, b4, acc4); acc5 = _mm512_fmadd_pd(a, b5, acc5);
-                                            acc6 = _mm512_fmadd_pd(a, b6, acc6); acc7 = _mm512_fmadd_pd(a, b7, acc7); acc8 = _mm512_fmadd_pd(a, b8, acc8);
-                                            acc9 = _mm512_fmadd_pd(a, b9, acc9); acc10 = _mm512_fmadd_pd(a, b10, acc10); acc11 = _mm512_fmadd_pd(a, b11, acc11);
-                                        }
-                                    }
-
-                                    sum0 += hsum512_pd(acc0); sum1 += hsum512_pd(acc1); sum2 += hsum512_pd(acc2);
-                                    sum3 += hsum512_pd(acc3); sum4 += hsum512_pd(acc4); sum5 += hsum512_pd(acc5);
-                                    sum6 += hsum512_pd(acc6); sum7 += hsum512_pd(acc7); sum8 += hsum512_pd(acc8);
-                                    sum9 += hsum512_pd(acc9); sum10 += hsum512_pd(acc10); sum11 += hsum512_pd(acc11);
-
-                                    C(ii, jj + 0) = sum0;  C(ii, jj + 1) = sum1;  C(ii, jj + 2) = sum2;
-                                    C(ii, jj + 3) = sum3;  C(ii, jj + 4) = sum4;  C(ii, jj + 5) = sum5;
-                                    C(ii, jj + 6) = sum6;  C(ii, jj + 7) = sum7;  C(ii, jj + 8) = sum8;
-                                    C(ii, jj + 9) = sum9;  C(ii, jj + 10) = sum10;  C(ii, jj + 11) = sum11;
-
-                                }
-                                for (; jj < jjEnd; ++jj) {
-                                    T sum = C(ii, jj);
-                                    for (std::size_t kk = k; kk < kkEnd; ++kk) {
-                                        sum = std::fma(ptrPA[(ii - i) * KC + (kk - k)],
-                                                    ptrPB[(jj - j) * KC + (kk - k)], sum);
-                                    }
-                                    C(ii, jj) = sum;
-                                }
-                            }
-                        #else
-                            for (std::size_t ii = i; ii < iiEnd; ++ii) {
-                                std::size_t jj = j;
-                                for (; jj < jjEnd; ++jj) {
-                                     T sum = C(ii, jj);
-                                     for (std::size_t kk = k; kk < kkEnd; ++kk) {
-                                        sum = std::fma(ptrPA[(ii - i) * KC + (kk - k)],
-                                                    ptrPB[(jj - j) * KC + (kk - k)], sum);
-                                     }
-                                     C(ii, jj) = sum;
-                                }
-                            }
-                        #endif
+                        kernel(A, B, C, i, j, k, iiEnd, jjEnd, kkEnd, ptrPA, ptrPB);
                     }
                 }
             }
@@ -514,5 +609,18 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
     }
     else {
         static_assert(L_A != L_A, "Unsupported Matrix multiply combination!");
+    }
+}
+
+template<typename T, StorageLayout L_A, StorageLayout L_B, StorageLayout L_C>
+void initialize(Matrix<T, L_A>& A, Matrix<T, L_B>& B, Matrix<T, L_C>& C) {
+    std::mt19937_64 rng(12345);
+    std::normal_distribution<double> dist(0.0, 1.0);
+
+    for (size_t i = 0; i < A.getRowSize(); ++i) {
+        for (size_t j = 0; j < A.getColSize(); ++j) {
+            A(i, j) = static_cast<T>(dist(rng));
+            B(i, j) = static_cast<T>(dist(rng));
+        }
     }
 }

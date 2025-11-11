@@ -95,6 +95,25 @@ elif [ "$MODE" = "compare" ]; then
 
     echo -e "\033[1;33mSpeedup (Internal):\033[0m  ${SPEEDUP_INT}x"
     echo -e "\033[1;33mSpeedup (Real Time):\033[0m ${SPEEDUP_REAL}x"
+elif [ "$MODE" = "scorer" ]; then
+    echo "Running scorer.py for the baseline and optimized implementations for N=$N, P=$P"
+    SCORER_BIN="python3 scorer.py"
+    BASE_PERF_BIN="python3 baseline/gemm_baseline.py"
+    BASE_PERF_FILE="baseline/gemm_baseline.py"
+    OPT_BIN="optimized/gemm_opt"
+
+    if [ ! -f "$BASE_PERF_FILE" ]; then
+        echo "Error: Baseline Python script not found: $BASE_PERF_FILE"
+        exit 1
+    fi
+    if [ ! -x "$OPT_BIN" ]; then
+        echo "Error: Optimized binary not found or not executable: $OPT_BIN"
+        echo "Did you run 'make'?"
+        exit 1
+    fi
+    $SCORER_BIN \
+        --baseline "$BASE_PERF_BIN $N $P" \
+        --optimized "$OPT_BIN $N $P"
 else
     echo "Unknown mode: $MODE"
     exit 1
