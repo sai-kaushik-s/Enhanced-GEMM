@@ -114,6 +114,162 @@ elif [ "$MODE" = "scorer" ]; then
     $SCORER_BIN \
         --baseline "$BASE_PERF_BIN $N $P" \
         --optimized "$OPT_BIN $N $P"
+elif [ "$MODE" = "perf" ]; then
+    echo "Running perf profiling for N=$N, P=$P"
+
+    BASE_PY="python3 baseline/gemm_baseline.py"
+    BASE_C="optimized/gemm_baseline"
+    OPT="optimized/gemm_opt"
+
+    if [ ! -f baseline/gemm_baseline.py ]; then
+        echo "Error: Python baseline missing"
+        exit 1
+    fi
+    if [ ! -x "$BASE_C" ]; then
+        echo "Error: C baseline missing"
+        exit 1
+    fi
+    if [ ! -x "$OPT" ]; then
+        echo "Error: Optimized binary missing"
+        exit 1
+    fi
+
+    run_perf() {
+        local CMD="$1"
+        # No -N flag, as per your request.
+        # We will handle comma-parsing in awk.
+        perf stat \
+            -e cycles,instructions,branches,branch-misses,\
+cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses,\
+L1-icache-loads,L1-icache-load-misses \
+            $CMD 2>&1 | awk -v N_DIM="$N" '
+                # This block runs for every line that is not the time line
+                $2 != "seconds" && $3 != "time" {
+                    # Copy fields to temporary variables
+                    # (e.g., $1="906,431,200", $2="cycles")
+                    # OR   ($1="cycles", $2="906,431,200")
+                    f1 = $1
+                    f2 = $2
+
+                    # Clean commas from both potential value fields
+                    # gsub(regex, replacement, target_string)
+                    gsub(",", "", f1)
+                    gsub(",", "", f2)
+
+                    # Now, check if the *cleaned* f1 is a number.
+                    # f1+0 will be > 0 if it was a number.
+                    if (f1+0 > 0) {
+                        # Format is: 906,431,200 cycles
+                        val = f1   # Use the cleaned number string (f1)
+                        evt = $2   # Use the original event name ($2)
+                    } else {
+                        # Format is: cycles 906,431,200
+                        val = f2   # Use the cleaned number string (f2)
+                        evt = $1   # Use the original event name ($1)
+                    }
+
+                    # Assign values based on the event name (evt)
+                    if (evt == "cycles")                  {cycles=val}
+                    if (evt == "instructions")            {ins=val}
+                    if (evt == "branches")                {br=val}
+                    if (evt == "branch-misses")           {brm=val}
+                    if (evt == "cache-references")        {cr=val}
+                    if (evt == "cache-misses")            {cm=val}
+                    if (evt == "L1-dcache-loads")         {l1d=val}
+                    if (evt == "L1-dcache-load-misses")   {l1dm=val}
+                    if (evt == "L1-icache-loads")         {l1i=val}
+                    if (evt == "L1-icache-load-misses")   {l1im=val}
+                }
+
+                $2 == "seconds" && $3 == "time" {time=$1}
+
+                END {
+                    # All calculations remain the same
+                    ipc = (cycles>0 ? ins/cycles : 0)
+                    brp = (br>0 ? (brm/br)*100 : 0)
+                    cmp = (cr>0 ? (cm/cr)*100 : 0)
+                    l1dp = (l1d>0 ? (l1dm/l1d)*100 : 0)
+                    l1ip = (l1i>0 ? (l1im/l1i)*100 : 0)
+
+                    flops = (2 * N_DIM * N_DIM * N_DIM)
+                    gflops = (time>0 ? (flops / time) / 1e9 : 0)
+
+                    printf "%s %s %.3f %s %.2f%% %s %.2f%% %.2f%% %.2f%% %.2f",
+                        cycles, ins, ipc,
+                        brm, brp,
+                        cm, cmp,
+                        l1dp, l1ip, gflops
+                }
+            '
+    }
+
+    # Run perf
+    PY=$(run_perf "$BASE_PY $N $P")
+    CBASE=$(run_perf "$BASE_C $N $P")
+    OPTSTATS=$(run_perf "$OPT $N $P")
+
+    # Prepare table rows
+    rows=(
+        "Python_Baseline $PY"
+        "C++_Baseline $CBASE"
+        "C++_Optimized $OPTSTATS"
+    )
+
+    # Extract matrix into an array for column sizing
+    # Column titles
+    titles=( "Target" "Cycles" "Instr" "IPC" "BrMiss" "BrMiss%" "LLCMiss" "LLCMiss%" "L1DMiss%" "L1IMiss%" "GFLOPS" )
+    col_count=${#titles[@]}
+
+    # init width array
+    for ((i=0; i<col_count; i++)); do widths[$i]=${#titles[$i]}; done
+
+    # compute widths
+    for row in "${rows[@]}"; do
+        i=0
+        for field in $row; do
+            len=${#field}
+            (( len > widths[$i] )) && widths[$i]=$len
+            ((i++))
+        done
+    done
+
+    print_separator() {
+        echo -n "+"
+        for w in "${widths[@]}"; do
+            printf -- "%0.s-" $(seq 1 $((w + 2)))
+            echo -n "+"
+        done
+        echo
+    }
+
+    print_row() {
+        i=0
+        echo -n "|"
+        for field in $1; do
+            printf " %-${widths[$i]}s " "$field"
+            echo -n "|"
+            ((i++))
+        done
+        echo
+    }
+
+    echo -e "\033[1;34m-----------------------------------------\033[0m"
+    echo -e "\033[1;32mPerformance Counters (perf stat) for N=$N\033[0m"
+    echo -e "\033[1;34m-----------------------------------------\033[0m"
+
+    # Print header
+    print_separator
+    header=""
+    for title in "${titles[@]}"; do header="$header$title "; done
+    print_row "$header"
+    print_separator
+
+    # Print rows
+    for row in "${rows[@]}"; do
+        print_row "$row"
+    done
+
+    print_separator
 else
     echo "Unknown mode: $MODE"
     exit 1
