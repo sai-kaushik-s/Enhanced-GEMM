@@ -6,9 +6,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <unistd.h>
-#ifdef __AVX2__
-    #include <immintrin.h>
-#endif
+#include <immintrin.h>
 
 template<typename T, StorageLayout Layout>
 Matrix<T, Layout>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCores) : 
