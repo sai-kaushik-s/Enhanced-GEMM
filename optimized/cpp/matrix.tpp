@@ -19,6 +19,13 @@ Matrix<T, Layout>::Matrix(std::size_t rows, std::size_t cols, std::size_t numCor
 {
     flatData.resize(rowSize * colSize);
 
+    T* data = flatData.data();
+    std::size_t totalSize = rowSize * colSize;
+    #pragma omp parallel for num_threads(numCores) schedule(static)
+    for (std::size_t i = 0; i < totalSize; ++i) {
+        data[i] = T(0);
+    }
+
     long l2Size = sysconf(_SC_LEVEL2_CACHE_SIZE);
     if (l2Size <= 0) l2Size = 512 * 1024;
 
@@ -76,11 +83,6 @@ Matrix<T, Layout>& Matrix<T, Layout>::operator=(const Matrix<T, Layout>& other) 
 
 template<typename T, StorageLayout Layout>
 void Matrix<T, Layout>::randomize(int seq_stride, int seq_offset) {
-    #pragma omp parallel for num_threads(numCores) schedule(static)
-    for (std::size_t i = 0; i < flatData.size(); ++i) {
-        flatData[i] = T(0);
-    }
-
     std::mt19937_64 rng(12345);
     std::normal_distribution<double> dist(0.0, 1.0);
 
@@ -493,5 +495,18 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
     }
     else {
         static_assert(L_A != L_A, "Unsupported Matrix multiply combination!");
+    }
+}
+
+template<typename T, StorageLayout L_A, StorageLayout L_B, StorageLayout L_C>
+void initialize(Matrix<T, L_A>& A, Matrix<T, L_B>& B, Matrix<T, L_C>& C) {
+    std::mt19937_64 rng(12345);
+    std::normal_distribution<double> dist(0.0, 1.0);
+
+    for (size_t i = 0; i < A.getRowSize(); ++i) {
+        for (size_t j = 0; j < A.getColSize(); ++j) {
+            A(i, j) = static_cast<T>(dist(rng));
+            B(i, j) = static_cast<T>(dist(rng));
+        }
     }
 }

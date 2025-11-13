@@ -40,9 +40,11 @@ int main(int argc, char** argv) {
     Matrix<double, StorageLayout::RowMajor> matA(N, N, T), matC(N, N, T);
     Matrix<double, StorageLayout::ColMajor> matB(N, N, T);
     
-    matA.randomize(2, 0);
-    matB.randomize(2, 1);
-    matC.initializeZero();
+    // matA.randomize(2, 0);
+    // matB.randomize(2, 1);
+    // matC.initializeZero();
+
+    initialize(matA, matB, matC);
 
     matA.packMatrix();
     matB.packMatrix();
