@@ -1,16 +1,11 @@
 #!/usr/bin/env bash
-# Package submission: creates a tarball with code + metadata
 set -euo pipefail
+
 TEAM=${1:-2025CSZ8470_2025ANZ8223}
 OUTPUT=submit_${TEAM}_$(date +%Y%m%d_%H%M%S).tar.gz
 
-#remove previous tgz
 rm *${TEAM}*gz || true
-# required files
-tar -czf ${OUTPUT} README.md baseline optimized Makefile run.sh submit.sh report_template.md
 
-
+tar -czf ${OUTPUT} README.md baseline optimized Makefile run.sh submit.sh report_template.md setup.sh benchmark.py plots
 echo "Created submission package: ${OUTPUT}"
-
-
 echo "Please upload ${OUTPUT} in Moodle "
