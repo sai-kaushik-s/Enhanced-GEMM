@@ -359,56 +359,7 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
                             ptrPB = localPB.data();
                         }
 
-                        #ifdef __AVX2__
-                            const std::size_t W = 4;
-                            const std::size_t PF_DIST = 64;
-
-                            std::size_t kk_vec_end = k + ((kkEnd - k) / W) * W;
-
-                            for (std::size_t ii = i; ii < iiEnd; ++ii) {
-                                std::size_t jj = j;
-                                const std::size_t jjUnrolledEnd = j + ((jjEnd - j) / 6) * 6;
-                                for (; jj < jjUnrolledEnd; jj += 6) {
-                                    T sum0 = C(ii, jj + 0); T sum1 = C(ii, jj + 1); T sum2 = C(ii, jj + 2);
-                                    T sum3 = C(ii, jj + 3); T sum4 = C(ii, jj + 4); T sum5 = C(ii, jj + 5);
-                                    __m256d acc0 = _mm256_setzero_pd(); __m256d acc1 = _mm256_setzero_pd();
-                                    __m256d acc2 = _mm256_setzero_pd(); __m256d acc3 = _mm256_setzero_pd();
-                                    __m256d acc4 = _mm256_setzero_pd(); __m256d acc5 = _mm256_setzero_pd();
-                                    for (std::size_t kk = k; kk < kk_vec_end; kk += W) {
-                                        _mm_prefetch((const char*)&ptrPA[(ii - i) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
-                                        _mm_prefetch((const char*)&ptrPB[(jj - j + 0) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
-                                        _mm_prefetch((const char*)&ptrPB[(jj - j + 1) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
-
-                                        __m256d a = _mm256_loadu_pd(&ptrPA[(ii - i) * KC + (kk - k)]);
-                                        __m256d b0 = _mm256_loadu_pd(&ptrPB[(jj - j + 0) * KC + (kk - k)]); __m256d b1 = _mm256_loadu_pd(&ptrPB[(jj - j + 1) * KC + (kk - k)]);
-                                        __m256d b2 = _mm256_loadu_pd(&ptrPB[(jj - j + 2) * KC + (kk - k)]); __m256d b3 = _mm256_loadu_pd(&ptrPB[(jj - j + 3) * KC + (kk - k)]);
-                                        __m256d b4 = _mm256_loadu_pd(&ptrPB[(jj - j + 4) * KC + (kk - k)]); __m256d b5 = _mm256_loadu_pd(&ptrPB[(jj - j + 5) * KC + (kk - k)]);
-
-                                        acc0 = _mm256_fmadd_pd(a, b0, acc0); acc1 = _mm256_fmadd_pd(a, b1, acc1); acc2 = _mm256_fmadd_pd(a, b2, acc2);
-                                        acc3 = _mm256_fmadd_pd(a, b3, acc3); acc4 = _mm256_fmadd_pd(a, b4, acc4); acc5 = _mm256_fmadd_pd(a, b5, acc5);
-                                    }
-                                    sum0 += hsum256_pd(acc0); sum1 += hsum256_pd(acc1); sum2 += hsum256_pd(acc2);
-                                    sum3 += hsum256_pd(acc3); sum4 += hsum256_pd(acc4); sum5 += hsum256_pd(acc5);
-                                    for (std::size_t kk = kk_vec_end; kk < kkEnd; ++kk) {
-                                        double a_val = ptrPA[(ii - i) * KC + (kk - k)];
-                                        sum0 += a_val * ptrPB[(jj - j + 0) * KC + (kk - k)]; sum1 += a_val * ptrPB[(jj - j + 1) * KC + (kk - k)];
-                                        sum2 += a_val * ptrPB[(jj - j + 2) * KC + (kk - k)]; sum3 += a_val * ptrPB[(jj - j + 3) * KC + (kk - k)];
-                                        sum4 += a_val * ptrPB[(jj - j + 4) * KC + (kk - k)]; sum5 += a_val * ptrPB[(jj - j + 5) * KC + (kk - k)];
-                                    }
-
-                                    C(ii, jj + 0) = sum0;  C(ii, jj + 1) = sum1;  C(ii, jj + 2) = sum2;
-                                    C(ii, jj + 3) = sum3;  C(ii, jj + 4) = sum4;  C(ii, jj + 5) = sum5;
-                                }
-                                for (; jj < jjEnd; ++jj) {
-                                    T sum = C(ii, jj);
-                                    for (std::size_t kk = k; kk < kkEnd; ++kk) {
-                                        sum = std::fma(ptrPA[(ii - i) * KC + (kk - k)],
-                                                    ptrPB[(jj - j) * KC + (kk - k)], sum);
-                                    }
-                                    C(ii, jj) = sum;
-                                }
-                            }
-                        #elif defined(__AVX512F__)
+                        #if defined(__AVX512F__)
                             const std::size_t W = 8;           
                             const std::size_t PF_DIST = 64;    
 
@@ -459,6 +410,55 @@ void multiply(const Matrix<T, L_A>& A, const Matrix<T, L_B>& B, Matrix<T, L_C>& 
 
                                     sum0 += hsum512_pd(acc0); sum1 += hsum512_pd(acc1); sum2 += hsum512_pd(acc2);
                                     sum3 += hsum512_pd(acc3); sum4 += hsum512_pd(acc4); sum5 += hsum512_pd(acc5);
+
+                                    C(ii, jj + 0) = sum0;  C(ii, jj + 1) = sum1;  C(ii, jj + 2) = sum2;
+                                    C(ii, jj + 3) = sum3;  C(ii, jj + 4) = sum4;  C(ii, jj + 5) = sum5;
+                                }
+                                for (; jj < jjEnd; ++jj) {
+                                    T sum = C(ii, jj);
+                                    for (std::size_t kk = k; kk < kkEnd; ++kk) {
+                                        sum = std::fma(ptrPA[(ii - i) * KC + (kk - k)],
+                                                    ptrPB[(jj - j) * KC + (kk - k)], sum);
+                                    }
+                                    C(ii, jj) = sum;
+                                }
+                            }
+                        #elif defined(__AVX2__)
+                            const std::size_t W = 4;
+                            const std::size_t PF_DIST = 64;
+
+                            std::size_t kk_vec_end = k + ((kkEnd - k) / W) * W;
+
+                            for (std::size_t ii = i; ii < iiEnd; ++ii) {
+                                std::size_t jj = j;
+                                const std::size_t jjUnrolledEnd = j + ((jjEnd - j) / 6) * 6;
+                                for (; jj < jjUnrolledEnd; jj += 6) {
+                                    T sum0 = C(ii, jj + 0); T sum1 = C(ii, jj + 1); T sum2 = C(ii, jj + 2);
+                                    T sum3 = C(ii, jj + 3); T sum4 = C(ii, jj + 4); T sum5 = C(ii, jj + 5);
+                                    __m256d acc0 = _mm256_setzero_pd(); __m256d acc1 = _mm256_setzero_pd();
+                                    __m256d acc2 = _mm256_setzero_pd(); __m256d acc3 = _mm256_setzero_pd();
+                                    __m256d acc4 = _mm256_setzero_pd(); __m256d acc5 = _mm256_setzero_pd();
+                                    for (std::size_t kk = k; kk < kk_vec_end; kk += W) {
+                                        _mm_prefetch((const char*)&ptrPA[(ii - i) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
+                                        _mm_prefetch((const char*)&ptrPB[(jj - j + 0) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
+                                        _mm_prefetch((const char*)&ptrPB[(jj - j + 1) * KC + (kk - k + PF_DIST)], _MM_HINT_T0);
+
+                                        __m256d a = _mm256_loadu_pd(&ptrPA[(ii - i) * KC + (kk - k)]);
+                                        __m256d b0 = _mm256_loadu_pd(&ptrPB[(jj - j + 0) * KC + (kk - k)]); __m256d b1 = _mm256_loadu_pd(&ptrPB[(jj - j + 1) * KC + (kk - k)]);
+                                        __m256d b2 = _mm256_loadu_pd(&ptrPB[(jj - j + 2) * KC + (kk - k)]); __m256d b3 = _mm256_loadu_pd(&ptrPB[(jj - j + 3) * KC + (kk - k)]);
+                                        __m256d b4 = _mm256_loadu_pd(&ptrPB[(jj - j + 4) * KC + (kk - k)]); __m256d b5 = _mm256_loadu_pd(&ptrPB[(jj - j + 5) * KC + (kk - k)]);
+
+                                        acc0 = _mm256_fmadd_pd(a, b0, acc0); acc1 = _mm256_fmadd_pd(a, b1, acc1); acc2 = _mm256_fmadd_pd(a, b2, acc2);
+                                        acc3 = _mm256_fmadd_pd(a, b3, acc3); acc4 = _mm256_fmadd_pd(a, b4, acc4); acc5 = _mm256_fmadd_pd(a, b5, acc5);
+                                    }
+                                    sum0 += hsum256_pd(acc0); sum1 += hsum256_pd(acc1); sum2 += hsum256_pd(acc2);
+                                    sum3 += hsum256_pd(acc3); sum4 += hsum256_pd(acc4); sum5 += hsum256_pd(acc5);
+                                    for (std::size_t kk = kk_vec_end; kk < kkEnd; ++kk) {
+                                        double a_val = ptrPA[(ii - i) * KC + (kk - k)];
+                                        sum0 += a_val * ptrPB[(jj - j + 0) * KC + (kk - k)]; sum1 += a_val * ptrPB[(jj - j + 1) * KC + (kk - k)];
+                                        sum2 += a_val * ptrPB[(jj - j + 2) * KC + (kk - k)]; sum3 += a_val * ptrPB[(jj - j + 3) * KC + (kk - k)];
+                                        sum4 += a_val * ptrPB[(jj - j + 4) * KC + (kk - k)]; sum5 += a_val * ptrPB[(jj - j + 5) * KC + (kk - k)];
+                                    }
 
                                     C(ii, jj + 0) = sum0;  C(ii, jj + 1) = sum1;  C(ii, jj + 2) = sum2;
                                     C(ii, jj + 3) = sum3;  C(ii, jj + 4) = sum4;  C(ii, jj + 5) = sum5;

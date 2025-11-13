@@ -1,18 +1,3 @@
-
-/*
-C++ optimized skeleton for GEMM. Students should fill in optimizations:
-- OpenMP parallelization
-- Blocking / tiling
-- SIMD intrinsics (AVX2 / AVX512)
-- NUMA-aware allocations
-
-Usage: ./gemm_opt N num_threads
-*/
-/*
-C++ optimized skeleton for GEMM.
-Usage: ./gemm_opt N num_threads
-*/
-
 #include <iostream>
 #include <string>
 #include <stdexcept>
@@ -50,6 +35,8 @@ int main(int argc, char** argv) {
     matB.packMatrix();
 
     double t0 = omp_get_wtime();
+    matA.packMatrix();
+    matB.packMatrix();
     multiply(matA, matB, matC);
     double t1 = omp_get_wtime();
     std::cout << "N=" << N << " T=" << T << " time=" << (t1 - t0) << " seconds\n";

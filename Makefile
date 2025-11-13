@@ -1,5 +1,5 @@
 CXX := g++
-CXXFLAGS := -O3 -march=native -fopenmp -DNDEBUG -Ioptimized/cpp -g
+CXXFLAGS := -O3 -march=native -mavx2 -mavx512f -mavx512dq -mavx512vl -mfma -fopenmp -DNDEBUG -Ioptimized/cpp -g
 LDFLAGS := -fopenmp -lnuma
 
 SRC_DIR := optimized/cpp
